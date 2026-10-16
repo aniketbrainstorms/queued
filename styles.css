@@ -100,3 +100,16 @@ dialog { max-width: 100%; border: 0; color: var(--text); }dialog::backdrop { bac
 :root{--mobile-hero-height:172px}@media(max-width:700px){.hero{height:var(--mobile-hero-height)!important;min-height:var(--mobile-hero-height)!important;max-height:var(--mobile-hero-height)!important;overflow:hidden!important}.hero h2{max-height:82px!important;overflow:hidden!important}.toolbar{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;width:100%!important;max-width:100%!important;gap:10px!important;padding:0 0 18px!important}.toolbar .primary-button,.toolbar .ghost-button{display:block!important;width:100%!important;min-width:0!important;max-width:none!important;flex:none!important;padding:12px 8px!important;white-space:nowrap!important;text-align:center!important}.toolbar-note{display:none!important}.empty{min-height:230px!important}}
 :root{--mobile-content-width:100%}@media(max-width:599px){#app{width:100%!important;max-width:none!important;min-width:0!important;box-sizing:border-box!important}#app>main{width:100%!important;max-width:none!important;min-width:0!important;box-sizing:border-box!important}.hero,.toolbar,.section-rule,.grid{width:100%!important;max-width:none!important;min-width:0!important;box-sizing:border-box!important}.hero{margin-left:0!important;margin-right:0!important}}
 @media(max-width:700px){.toolbar{padding-top:12px!important}}
+
+/* Episode progress: grid mini bar, detail block, finish prompt, add preview */
+.bar { display: block; height: 4px; margin-top: 4px; overflow: hidden; border-radius: 2px; background: var(--surface-2); }
+.bar-fill { display: block; height: 100%; background: var(--accent); }
+.progress-mini > span:first-child { display: block; margin-top: 6px; color: var(--text-dim); font-size: 9px; }
+.progress-block { clear: both; margin: 14px 0; padding: 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.progress-label { margin: 0 0 8px; font-weight: 800; }
+.progress-block .bar { height: 6px; margin-bottom: 4px; }
+.finish-prompt { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.finish-prompt p { margin: 0 0 4px; }
+.add-preview { display: grid; gap: 10px; }
+.add-preview h3 { margin: 0; font-size: 22px; letter-spacing: -.04em; }
+.add-preview p { margin: 0; }
