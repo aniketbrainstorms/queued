@@ -1,0 +1,11 @@
+{
+  "name": "queued",
+  "private": true,
+  "description": "Queued: a personal movie and TV tracker (local-only PWA)",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0"
+  }
+}
