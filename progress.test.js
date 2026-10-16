@@ -185,6 +185,37 @@ test('previous skips 0-episode seasons', () => {
   assert.deepEqual(p.previousEpisode(seasons, ptr(3, 1)).pointer, ptr(1, 6));
 });
 
+test('previous from a not-started later season steps back one episode, not to the same place', () => {
+  const r = p.previousEpisode(SHOW, ptr(2, 0));
+  assert.deepEqual(r.pointer, ptr(1, 2));
+  assert.equal(r.changed, true);
+  assert.equal(r.rolledOver, true);
+  // S2 not started and the end of S1 are the same place, so Back from either lands together
+  assert.deepEqual(r.pointer, p.previousEpisode(SHOW, ptr(1, 3)).pointer);
+});
+
+test('previous from a not-started season after a one-episode season goes to not started', () => {
+  const seasons = [{ number: 1, episodeCount: 1 }, { number: 2, episodeCount: 4 }];
+  assert.deepEqual(p.previousEpisode(seasons, ptr(2, 0)).pointer, ptr(1, 0));
+});
+
+test('previous from a not-started season skips 0-episode seasons', () => {
+  const seasons = [
+    { number: 1, episodeCount: 6 },
+    { number: 2, episodeCount: 0 },
+    { number: 3, episodeCount: 4 }
+  ];
+  assert.deepEqual(p.previousEpisode(seasons, ptr(3, 0)).pointer, ptr(1, 5));
+});
+
+test('previous from a not-started season refuses to guess when the earlier count is unknown', () => {
+  const seasons = [{ number: 1, episodeCount: null }, { number: 2, episodeCount: 3 }];
+  const r = p.previousEpisode(seasons, ptr(2, 0));
+  assert.equal(r.changed, false);
+  assert.equal(r.reason, 'unknown_previous_count');
+  assert.deepEqual(r.pointer, ptr(2, 0));
+});
+
 test('previous refuses to guess when the earlier season has an unknown count', () => {
   const seasons = [{ number: 1, episodeCount: null }, { number: 2, episodeCount: 3 }];
   const r = p.previousEpisode(seasons, ptr(2, 1));

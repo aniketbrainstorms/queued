@@ -21,6 +21,10 @@ var DB_VERSION = 1;
 var STATUSES = ['watchlist', 'watching', 'watched'];
 var TITLE_KEY_PATTERN = /^(movie|tv):[1-9][0-9]*$/;
 
+// Backup file format. Bump EXPORT_VERSION when the file shape changes.
+var EXPORT_APP = 'queued';
+var EXPORT_VERSION = 1;
+
 var dbPromise = null;
 
 class DbError extends Error {
@@ -216,6 +220,23 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// Milliseconds for an ISO date string; 0 when it is missing or unreadable.
+function timeOf(iso) {
+  var ms = Date.parse(iso);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function isValidDate(value) {
+  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+
+// Oldest first by date. Ties keep insertion order (the auto id).
+function compareLogEntries(a, b) {
+  var diff = timeOf(a.at) - timeOf(b.at);
+  if (diff !== 0) return diff;
+  return a.id - b.id;
+}
+
 // ---------- titles ----------
 
 async function getTitle(key) {
@@ -360,6 +381,31 @@ async function commitEpisode(key, pointer, seasons) {
   await done;
 }
 
+// Undo of a "Next episode" tap: saves the earlier pointer and removes the log
+// entry that tap made, atomically. The newest log entry is removed only when it
+// matches the position being undone, so a pointer moved by the stepper (which
+// logs nothing) never costs an unrelated log entry.
+// Returns { removedLogEntry: true | false }.
+async function undoEpisode(key, pointer, seasons) {
+  var db = await openDb();
+  var tx = db.transaction(['progress', 'watch_log'], 'readwrite');
+  var done = txDone(tx);
+  var progress = tx.objectStore('progress');
+  var log = tx.objectStore('watch_log');
+  var current = await requestToPromise(progress.get(key));
+  var entries = await requestToPromise(log.index('titleKey').getAll(key));
+  entries.sort(compareLogEntries);
+  var latest = entries.length > 0 ? entries[entries.length - 1] : null;
+  var removed = false;
+  if (current && latest && latest.season === current.season && latest.episode === current.episode) {
+    log.delete(latest.id);
+    removed = true;
+  }
+  progress.put(makeProgressRecord(key, pointer, seasons));
+  await done;
+  return { removedLogEntry: removed };
+}
+
 // Sets status to watched. A movie also gets a log entry (season and episode
 // null); a series' episodes are already in the log from commitEpisode.
 async function markWatched(key) {
@@ -382,13 +428,21 @@ async function markWatched(key) {
   return updated;
 }
 
-// Log entries, oldest first. Pass a title key to get just that title's.
+// Log entries, oldest first by date (an import can add older entries after
+// newer ones, so the auto id alone is not a safe order). Pass a title key to
+// get just that title's.
 async function getWatchLog(titleKey) {
   var db = await openDb();
   var tx = db.transaction('watch_log', 'readonly');
   var store = tx.objectStore('watch_log');
-  if (titleKey === undefined) return requestToPromise(store.getAll());
-  return requestToPromise(store.index('titleKey').getAll(titleKey));
+  var entries;
+  if (titleKey === undefined) {
+    entries = await requestToPromise(store.getAll());
+  } else {
+    entries = await requestToPromise(store.index('titleKey').getAll(titleKey));
+  }
+  entries.sort(compareLogEntries);
+  return entries;
 }
 
 // ---------- lists ----------
@@ -582,9 +636,423 @@ async function purgeExpiredCache() {
   return expired.length;
 }
 
+// ---------- export and import (backup file) ----------
+//
+// File shape (JSON):
+//   { app: 'queued', version, exportedAt,
+//     titles:    [titles records],
+//     progress:  [progress records],
+//     watchLog:  [{ titleKey, season, episode, at }]        (no ids)
+//     lists:     [{ id, name, createdAt }]                  (id only links items)
+//     listItems: [{ listId, titleKey, position }] }
+// The cache is not exported, and neither is the TMDB key (it is not in this
+// database at all).
+//
+// Import merges into the library; it never deletes anything.
+//   titles    new key: added. Same key: the newer updatedAt wins, and addedAt
+//             keeps the earlier of the two.
+//   progress  the furthest (season, episode) wins; the seasons list comes from
+//             whichever record is newer.
+//   watchLog  entries are added unless an identical one (title, season,
+//             episode, time) is already there.
+//   lists     matched by name (ignoring case and outer spaces). Missing titles
+//             are appended to the end of the matching list, in the file's order.
+//             Unmatched lists are created.
+// Progress, log entries and list items that point at a title that is in neither
+// the file nor the library are skipped (counted in summary.skipped).
+// The whole file is checked before anything is written, and the merge runs in
+// one transaction: it all lands or none of it does.
+
+async function exportAll() {
+  var db = await openDb();
+  var tx = db.transaction(['titles', 'progress', 'watch_log', 'lists', 'list_items'], 'readonly');
+  // Every request gets its handler at once (inside requestToPromise), so no
+  // result can arrive before something is listening.
+  var parts = await Promise.all([
+    requestToPromise(tx.objectStore('titles').getAll()),
+    requestToPromise(tx.objectStore('progress').getAll()),
+    requestToPromise(tx.objectStore('watch_log').getAll()),
+    requestToPromise(tx.objectStore('lists').getAll()),
+    requestToPromise(tx.objectStore('list_items').getAll())
+  ]);
+
+  var log = parts[2];
+  log.sort(compareLogEntries);
+  var watchLog = [];
+  for (var i = 0; i < log.length; i++) {
+    watchLog.push({
+      titleKey: log[i].titleKey,
+      season: log[i].season,
+      episode: log[i].episode,
+      at: log[i].at
+    });
+  }
+
+  var items = parts[4];
+  items.sort(compareByPosition);
+  var listItems = [];
+  for (var j = 0; j < items.length; j++) {
+    listItems.push({ listId: items[j].listId, titleKey: items[j].titleKey, position: items[j].position });
+  }
+
+  return {
+    app: EXPORT_APP,
+    version: EXPORT_VERSION,
+    exportedAt: nowIso(),
+    titles: parts[0],
+    progress: parts[1],
+    watchLog: watchLog,
+    lists: parts[3],
+    listItems: listItems
+  };
+}
+
+// ----- reading and checking the file -----
+
+function parseBackup(input) {
+  var data = input;
+  if (typeof input === 'string') {
+    try {
+      data = JSON.parse(input);
+    } catch (err) {
+      throw new DbError('INVALID', 'That file is not valid JSON.');
+    }
+  }
+  if (!data || typeof data !== 'object' || data.app !== EXPORT_APP) {
+    throw new DbError('INVALID', 'That file is not a Queued backup.');
+  }
+  if (!Number.isInteger(data.version) || data.version < 1) {
+    throw new DbError('INVALID', 'The backup has no valid version.');
+  }
+  if (data.version > EXPORT_VERSION) {
+    throw new DbError('INVALID', 'This backup was made by a newer version of Queued.');
+  }
+  return data;
+}
+
+function readBackupArray(data, name) {
+  var value = data[name];
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new DbError('INVALID', 'Backup field "' + name + '" must be a list.');
+  }
+  return value;
+}
+
+function badRecord(name, index, detail) {
+  return new DbError('INVALID', 'Backup ' + name + ' #' + (index + 1) + ': ' + detail);
+}
+
+function isCount(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+function isTitleKey(value) {
+  return typeof value === 'string' && TITLE_KEY_PATTERN.test(value);
+}
+
+function cleanImportedTitle(raw, index, now) {
+  if (!raw || typeof raw !== 'object') throw badRecord('titles', index, 'not a record');
+  try {
+    validateTitleRecord(raw);
+  } catch (err) {
+    throw badRecord('titles', index, err.message);
+  }
+  var addedAt = isValidDate(raw.addedAt) ? raw.addedAt : now;
+  var updatedAt = isValidDate(raw.updatedAt) ? raw.updatedAt : addedAt;
+  return Object.assign({}, raw, { addedAt: addedAt, updatedAt: updatedAt });
+}
+
+function cleanImportedProgress(raw, index, now) {
+  if (!raw || typeof raw !== 'object') throw badRecord('progress', index, 'not a record');
+  if (!isTitleKey(raw.key) || raw.key.indexOf('tv:') !== 0) {
+    throw badRecord('progress', index, 'key must look like "tv:123"');
+  }
+  if (!isCount(raw.season) || !isCount(raw.episode)) {
+    throw badRecord('progress', index, 'season and episode must be whole numbers');
+  }
+  return {
+    key: raw.key,
+    season: raw.season,
+    episode: raw.episode,
+    seasons: Array.isArray(raw.seasons) ? raw.seasons : [],
+    updatedAt: isValidDate(raw.updatedAt) ? raw.updatedAt : now
+  };
+}
+
+function cleanImportedLogEntry(raw, index) {
+  if (!raw || typeof raw !== 'object') throw badRecord('watchLog', index, 'not a record');
+  if (!isTitleKey(raw.titleKey)) throw badRecord('watchLog', index, 'titleKey is not a valid key');
+  if (!isValidDate(raw.at)) throw badRecord('watchLog', index, 'at must be a date');
+  var season = raw.season === undefined ? null : raw.season;
+  var episode = raw.episode === undefined ? null : raw.episode;
+  var bothEmpty = season === null && episode === null;
+  if (!bothEmpty && !(isCount(season) && isCount(episode))) {
+    throw badRecord('watchLog', index, 'season and episode must both be whole numbers, or both empty');
+  }
+  // Canonical date text, so the same moment always compares equal.
+  return { titleKey: raw.titleKey, season: season, episode: episode, at: new Date(raw.at).toISOString() };
+}
+
+function cleanImportedList(raw, index, now) {
+  if (!raw || typeof raw !== 'object') throw badRecord('lists', index, 'not a record');
+  if (!Number.isInteger(raw.id)) throw badRecord('lists', index, 'id must be a whole number');
+  var name = typeof raw.name === 'string' ? raw.name.trim() : '';
+  if (name === '') throw badRecord('lists', index, 'name is required');
+  return { id: raw.id, name: name, createdAt: isValidDate(raw.createdAt) ? raw.createdAt : now };
+}
+
+function cleanImportedListItem(raw, index) {
+  if (!raw || typeof raw !== 'object') throw badRecord('listItems', index, 'not a record');
+  if (!Number.isInteger(raw.listId)) throw badRecord('listItems', index, 'listId must be a whole number');
+  if (!isTitleKey(raw.titleKey)) throw badRecord('listItems', index, 'titleKey is not a valid key');
+  var position = typeof raw.position === 'number' && Number.isFinite(raw.position) ? raw.position : 0;
+  return { listId: raw.listId, titleKey: raw.titleKey, position: position };
+}
+
+// Checks the whole file and returns cleaned copies. Throws INVALID on the first
+// problem, before anything is written.
+function cleanBackup(input) {
+  var data = parseBackup(input);
+  var now = nowIso();
+  var clean = { titles: [], progress: [], watchLog: [], lists: [], listItems: [] };
+  var titles = readBackupArray(data, 'titles');
+  for (var a = 0; a < titles.length; a++) clean.titles.push(cleanImportedTitle(titles[a], a, now));
+  var progress = readBackupArray(data, 'progress');
+  for (var b = 0; b < progress.length; b++) clean.progress.push(cleanImportedProgress(progress[b], b, now));
+  var log = readBackupArray(data, 'watchLog');
+  for (var c = 0; c < log.length; c++) clean.watchLog.push(cleanImportedLogEntry(log[c], c));
+  var lists = readBackupArray(data, 'lists');
+  for (var d = 0; d < lists.length; d++) clean.lists.push(cleanImportedList(lists[d], d, now));
+  var items = readBackupArray(data, 'listItems');
+  for (var e = 0; e < items.length; e++) clean.listItems.push(cleanImportedListItem(items[e], e));
+  return clean;
+}
+
+// ----- merge rules (pure) -----
+
+// The record to write for a title that exists on both sides, or null if the
+// library's record should stay exactly as it is.
+function mergeTitleRecords(existing, incoming) {
+  var incomingWins = timeOf(incoming.updatedAt) > timeOf(existing.updatedAt);
+  var winner = incomingWins ? incoming : existing;
+  var addedAt = timeOf(incoming.addedAt) < timeOf(existing.addedAt) ? incoming.addedAt : existing.addedAt;
+  if (!incomingWins && addedAt === existing.addedAt) return null;
+  return Object.assign({}, winner, { addedAt: addedAt });
+}
+
+function comparePointers(a, b) {
+  if (a.season !== b.season) return a.season - b.season;
+  return a.episode - b.episode;
+}
+
+// The furthest pointer wins; the seasons list comes from the newer record
+// (it is the fresher copy of TMDB's data). null means nothing to change.
+function mergeProgressRecords(existing, incoming) {
+  var incomingFurther = comparePointers(incoming, existing) > 0;
+  var furthest = incomingFurther ? incoming : existing;
+  var newer = timeOf(incoming.updatedAt) > timeOf(existing.updatedAt) ? incoming : existing;
+  if (!incomingFurther && newer === existing) return null;
+  return {
+    key: existing.key,
+    season: furthest.season,
+    episode: furthest.episode,
+    seasons: newer.seasons,
+    updatedAt: newer.updatedAt
+  };
+}
+
+function logEntryId(entry) {
+  return entry.titleKey + '|' + entry.season + '|' + entry.episode + '|' + entry.at;
+}
+
+function listNameKey(name) {
+  return name.trim().toLowerCase();
+}
+
+function getListState(states, listId) {
+  if (!states[listId]) states[listId] = { keys: {}, next: 0 };
+  return states[listId];
+}
+
+function emptyImportSummary() {
+  return {
+    titlesAdded: 0,
+    titlesUpdated: 0,
+    titlesKept: 0,
+    progressWritten: 0,
+    logAdded: 0,
+    listsAdded: 0,
+    listItemsAdded: 0,
+    skipped: 0
+  };
+}
+
+// ----- merge steps (inside the import transaction) -----
+
+// Returns { 'movie:1': true, ... } for every title in the library afterwards.
+async function mergeImportedTitles(tx, incoming, summary) {
+  var store = tx.objectStore('titles');
+  var existingList = await requestToPromise(store.getAll());
+  var byKey = {};
+  var known = {};
+  for (var i = 0; i < existingList.length; i++) {
+    byKey[existingList[i].key] = existingList[i];
+    known[existingList[i].key] = true;
+  }
+  for (var j = 0; j < incoming.length; j++) {
+    var rec = incoming[j];
+    var existing = byKey[rec.key];
+    if (!existing) {
+      await requestToPromise(store.put(rec));
+      byKey[rec.key] = rec;
+      known[rec.key] = true;
+      summary.titlesAdded++;
+      continue;
+    }
+    var merged = mergeTitleRecords(existing, rec);
+    if (merged) {
+      await requestToPromise(store.put(merged));
+      byKey[rec.key] = merged;
+      summary.titlesUpdated++;
+    } else {
+      summary.titlesKept++;
+    }
+  }
+  return known;
+}
+
+async function mergeImportedProgress(tx, incoming, known, summary) {
+  var store = tx.objectStore('progress');
+  var existingList = await requestToPromise(store.getAll());
+  var byKey = {};
+  for (var i = 0; i < existingList.length; i++) byKey[existingList[i].key] = existingList[i];
+  for (var j = 0; j < incoming.length; j++) {
+    var rec = incoming[j];
+    if (!known[rec.key]) {
+      summary.skipped++;
+      continue;
+    }
+    var existing = byKey[rec.key];
+    var toWrite = existing ? mergeProgressRecords(existing, rec) : rec;
+    if (toWrite) {
+      await requestToPromise(store.put(toWrite));
+      byKey[rec.key] = toWrite;
+      summary.progressWritten++;
+    }
+  }
+}
+
+async function mergeImportedLog(tx, incoming, known, summary) {
+  var store = tx.objectStore('watch_log');
+  var existingList = await requestToPromise(store.getAll());
+  var seen = {};
+  for (var i = 0; i < existingList.length; i++) seen[logEntryId(existingList[i])] = true;
+  for (var j = 0; j < incoming.length; j++) {
+    var entry = incoming[j];
+    if (!known[entry.titleKey]) {
+      summary.skipped++;
+      continue;
+    }
+    var id = logEntryId(entry);
+    if (seen[id]) continue;
+    seen[id] = true;
+    await requestToPromise(store.add(entry));
+    summary.logAdded++;
+  }
+}
+
+async function mergeImportedLists(tx, lists, listItems, known, summary) {
+  var listStore = tx.objectStore('lists');
+  var itemStore = tx.objectStore('list_items');
+  var existingLists = await requestToPromise(listStore.getAll());
+  var existingItems = await requestToPromise(itemStore.getAll());
+
+  // Library lists by name (first one wins if the user has two with one name).
+  var idByName = Object.create(null);
+  for (var i = 0; i < existingLists.length; i++) {
+    var nameKey = listNameKey(existingLists[i].name);
+    if (idByName[nameKey] === undefined) idByName[nameKey] = existingLists[i].id;
+  }
+
+  // What each library list already holds, and where its next item goes.
+  var states = {};
+  for (var j = 0; j < existingItems.length; j++) {
+    var held = getListState(states, existingItems[j].listId);
+    held.keys[existingItems[j].titleKey] = true;
+    if (existingItems[j].position >= held.next) held.next = existingItems[j].position + 1;
+  }
+
+  // File list id -> library list id, creating lists that do not exist yet.
+  var targetIds = {};
+  for (var k = 0; k < lists.length; k++) {
+    var key = listNameKey(lists[k].name);
+    if (idByName[key] === undefined) {
+      idByName[key] = await requestToPromise(listStore.add({ name: lists[k].name, createdAt: lists[k].createdAt }));
+      summary.listsAdded++;
+    }
+    targetIds[lists[k].id] = idByName[key];
+  }
+
+  var ordered = listItems.slice().sort(compareByPosition);
+  for (var m = 0; m < ordered.length; m++) {
+    var item = ordered[m];
+    var target = targetIds[item.listId];
+    if (target === undefined || !known[item.titleKey]) {
+      summary.skipped++;
+      continue;
+    }
+    var state = getListState(states, target);
+    if (state.keys[item.titleKey]) continue;
+    await requestToPromise(itemStore.add({ listId: target, titleKey: item.titleKey, position: state.next }));
+    state.keys[item.titleKey] = true;
+    state.next++;
+    summary.listItemsAdded++;
+  }
+}
+
+function abortQuietly(tx) {
+  try {
+    tx.abort();
+  } catch (err) {
+    // Already finished or aborted; nothing to undo.
+  }
+}
+
+async function settleQuietly(promise) {
+  try {
+    await promise;
+  } catch (err) {
+    // The failure that matters is the one the caller is about to rethrow.
+  }
+}
+
+// input: the parsed backup object, or its JSON text.
+// Returns a summary of what changed (see emptyImportSummary).
+async function importAll(input) {
+  var clean = cleanBackup(input);
+  var db = await openDb();
+  var tx = db.transaction(['titles', 'progress', 'watch_log', 'lists', 'list_items'], 'readwrite');
+  var done = txDone(tx);
+  var summary = emptyImportSummary();
+  try {
+    var known = await mergeImportedTitles(tx, clean.titles, summary);
+    await mergeImportedProgress(tx, clean.progress, known, summary);
+    await mergeImportedLog(tx, clean.watchLog, known, summary);
+    await mergeImportedLists(tx, clean.lists, clean.listItems, known, summary);
+  } catch (err) {
+    abortQuietly(tx);
+    await settleQuietly(done);
+    throw err;
+  }
+  await done;
+  return summary;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     STATUSES: STATUSES,
+    EXPORT_VERSION: EXPORT_VERSION,
     DbError: DbError,
     openDb: openDb,
     closeDb: closeDb,
@@ -601,6 +1069,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getProgress: getProgress,
     saveProgress: saveProgress,
     commitEpisode: commitEpisode,
+    undoEpisode: undoEpisode,
     markWatched: markWatched,
     getWatchLog: getWatchLog,
     createList: createList,
@@ -614,6 +1083,8 @@ if (typeof module !== 'undefined' && module.exports) {
     reorderList: reorderList,
     getCache: getCache,
     putCache: putCache,
-    purgeExpiredCache: purgeExpiredCache
+    purgeExpiredCache: purgeExpiredCache,
+    exportAll: exportAll,
+    importAll: importAll
   };
 }

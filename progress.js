@@ -170,6 +170,16 @@ function previousEpisode(seasons, pointer) {
   if (prevCount === null) {
     return makeResult(list, p, false, false, 'unknown_previous_count');
   }
+  if (p.episode === 0) {
+    // "Not started" in a later season (the stepper can put you there) is the
+    // same place as the end of the earlier season. Back from there is one
+    // step before that, not a jump to the same place.
+    var back = previousEpisode(list, { season: list[prev].number, episode: prevCount });
+    if (!back.changed) {
+      return makeResult(list, p, false, false, back.reason);
+    }
+    return makeResult(list, back.pointer, true, back.pointer.season !== p.season, null);
+  }
   return makeResult(list, { season: list[prev].number, episode: prevCount }, true, true, null);
 }
 
