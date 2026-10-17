@@ -551,6 +551,16 @@ function onSettingsSubmit(event) {
   handleSaveKey();
 }
 
+// Offline support and installability. A failure here must never break the app.
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('sw.js').catch(logWorkerFailure);
+}
+
+function logWorkerFailure(err) {
+  console.warn('Queued: offline support unavailable', err);
+}
+
 function init() {
   hydrateIcons(document);
 
@@ -574,6 +584,7 @@ function init() {
   byId('import-file').addEventListener('change', onImportChange);
 
   render();
+  registerServiceWorker();
 }
 
 document.addEventListener('DOMContentLoaded', init);
