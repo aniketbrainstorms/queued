@@ -9,50 +9,86 @@
 </head>
 <body>
 <div id="app">
-  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
   <header class="topbar">
-    <div class="brand-lockup"><span class="brand-mark">Q</span><div><p class="eyebrow">PRIVATE CINEMA CLUB</p><h1>Queued<span class="brand-dot">.</span></h1></div></div>
-    <div class="header-actions"><span class="status-chip"><i></i> LOCAL ONLY</span><button class="icon-button" id="settings-button" aria-label="Open settings">⚙</button></div>
+    <div class="brand-lockup">
+      <span class="brand-mark" aria-hidden="true">Q</span>
+      <div>
+        <p class="eyebrow">Private cinema club</p>
+        <h1>Queued<span class="brand-dot">.</span></h1>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span class="status-chip"><i></i>LOCAL ONLY</span>
+      <button type="button" class="icon-button" id="settings-button" aria-label="Open settings"><span data-icon="sliders"></span></button>
+    </div>
   </header>
+
   <main>
     <section class="hero" id="hero">
-      <div class="hero-copy"><p class="eyebrow" id="view-kicker">WATCHLIST / 01</p><h2 id="view-title">What’s next?</h2><p class="muted" id="view-description">Save something for later.</p></div>
-      <div class="hero-stamp"><span>YOUR</span><strong>SCREEN</strong><span>YOUR RULES</span></div><div class="hero-scribble">✳</div>
+      <div class="hero-copy">
+        <p class="eyebrow" id="view-kicker">Watchlist</p>
+        <h2 id="view-title">What’s next?</h2>
+        <p class="muted" id="view-description">Save something for later.</p>
+      </div>
+      <div class="hero-stamp" aria-hidden="true"><span>YOUR</span><strong>SCREEN</strong><span>YOUR RULES</span></div>
     </section>
+
     <section class="toolbar">
-      <button class="primary-button" id="search-button"><b>＋</b> Add a title</button><button class="ghost-button" id="export-button">Export shelf ↗</button><span class="toolbar-note">A little archive<br>of your own.</span>
+      <button type="button" class="primary-button" id="search-button"><span data-icon="plus"></span>Add a title</button>
+      <button type="button" class="ghost-button" id="export-button"><span data-icon="download"></span>Export</button>
+      <span class="toolbar-note">A little archive<br>of your own.</span>
     </section>
+
     <div class="section-rule"><span>THE SHELF</span><span id="shelf-count">0 TITLES</span></div>
     <section class="grid" id="library-grid" aria-live="polite"></section>
   </main>
+
   <nav class="bottom-bar" aria-label="Library views">
-    <button data-view="watching"><span>▶</span>Watching</button>
-    <button data-view="watchlist" class="active"><span>＋</span>Watchlist</button>
-    <button data-view="watched"><span>✓</span>Watched</button>
-    <button data-view="collections"><span>▦</span>Lists</button>
+    <button type="button" data-view="watching"><span data-icon="play"></span>Watching</button>
+    <button type="button" data-view="watchlist" class="active" aria-current="page"><span data-icon="bookmark"></span>Watchlist</button>
+    <button type="button" data-view="watched"><span data-icon="check"></span>Watched</button>
+    <button type="button" data-view="collections"><span data-icon="grid"></span>Lists</button>
   </nav>
 
-  <dialog id="search-dialog" class="sheet">
+  <dialog id="search-dialog" class="sheet" aria-labelledby="search-title">
     <form method="dialog" class="sheet-content" id="search-form">
-      <div class="sheet-heading"><div><p class="eyebrow">TMDB SEARCH</p><h2>Find a title</h2></div><button class="close-button">×</button></div>
-      <div class="search-row"><input id="search-input" autocomplete="off" placeholder="Search movies, series or people"><button class="primary-button" type="submit">Search</button></div>
+      <div class="sheet-heading">
+        <div><p class="eyebrow">TMDB search</p><h2 id="search-title">Find a title</h2></div>
+        <button type="button" class="close-button" data-close aria-label="Close"><span data-icon="x"></span></button>
+      </div>
+      <div class="search-row">
+        <input id="search-input" type="search" autocomplete="off" placeholder="Search movies or series" aria-label="Search movies or series">
+        <button class="primary-button" type="submit">Search</button>
+      </div>
       <div id="search-results" class="results"></div>
     </form>
   </dialog>
 
-  <dialog id="detail-dialog" class="sheet"><div class="sheet-content" id="detail-content"></div></dialog>
-  <dialog id="settings-dialog" class="sheet"><form method="dialog" class="sheet-content" id="settings-form">
-    <div class="sheet-heading"><div><p class="eyebrow">ABOUT / SETTINGS</p><h2>Keep it yours</h2></div><button class="close-button">×</button></div>
-    <p class="muted">Your TMDB key stays in this browser and is never included in exports.</p>
-    <label class="field-label" for="tmdb-key">TMDB API key or read access token</label>
-    <input id="tmdb-key" type="password" autocomplete="off" placeholder="Paste your key here">
-    <p class="small muted" id="key-state"></p>
-    <div class="button-row"><button class="primary-button" type="button" id="save-key">Save and test</button><button class="ghost-button" type="button" id="clear-key">Clear</button></div>
-    <hr><button class="ghost-button full-width" type="button" id="import-button">Import JSON backup</button><input id="import-file" type="file" accept="application/json" hidden>
-    <p class="small muted">Powered by TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
-  </form></dialog>
+  <dialog id="detail-dialog" class="sheet" aria-label="Title details"><div class="sheet-content" id="detail-content"></div></dialog>
+
+  <dialog id="settings-dialog" class="sheet" aria-labelledby="settings-title">
+    <form method="dialog" class="sheet-content" id="settings-form">
+      <div class="sheet-heading">
+        <div><p class="eyebrow">About / Settings</p><h2 id="settings-title">Keep it yours</h2></div>
+        <button type="button" class="close-button" data-close aria-label="Close"><span data-icon="x"></span></button>
+      </div>
+      <p class="muted">Your TMDB key stays in this browser and is never included in exports.</p>
+      <label class="field-label" for="tmdb-key">TMDB API key or read access token</label>
+      <input id="tmdb-key" type="password" autocomplete="off" placeholder="Paste your key here">
+      <p class="small muted" id="key-state"></p>
+      <div class="button-row">
+        <button class="primary-button grow" type="button" id="save-key">Save and test</button>
+        <button class="ghost-button" type="button" id="clear-key">Clear</button>
+      </div>
+      <hr>
+      <button class="ghost-button full-width" type="button" id="import-button">Import JSON backup</button>
+      <input id="import-file" type="file" accept="application/json" hidden>
+      <p class="small muted" style="margin-top: var(--s4)">Powered by TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" role="status"></div>
 </div>
-  <script src="settings.js"></script><script src="db.js"></script><script src="progress.js"></script><script src="tmdb.js"></script><script src="app.js"></script>
+<script src="settings.js"></script><script src="db.js"></script><script src="progress.js"></script><script src="tmdb.js"></script><script src="app.js"></script>
 </body>
 </html>
