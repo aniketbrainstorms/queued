@@ -53,7 +53,13 @@ var ICON_PATHS = {
   grid: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/>',
   film: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8.5 4v16M15.5 4v16M4 9h4.5M4 15h4.5M15.5 9H20M15.5 15H20"/>',
   'chevron-left': '<path d="m14.5 6-6 6 6 6"/>',
-  'chevron-right': '<path d="m9.5 6 6 6-6 6"/>'
+  'chevron-right': '<path d="m9.5 6 6 6-6 6"/>',
+  ticket: '<path d="M4 8.5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1V10a2 2 0 0 0 0 4v1.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V14a2 2 0 0 0 0-4z"/><path d="M14 8v8" stroke-dasharray="1.5 2"/>',
+  'map-pin': '<path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/>',
+  screen: '<rect x="3" y="5" width="18" height="11" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  users: '<circle cx="9" cy="8.5" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="17" cy="9.5" r="2.3"/><path d="M16.5 14.4a4.4 4.4 0 0 1 4 4.6"/>',
+  coin: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>',
+  device: '<rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 19h18"/>'
 };
 
 function icon(name) {
