@@ -171,6 +171,86 @@ function hasRating(viewing) {
   return viewing.rating !== null && viewing.rating !== undefined;
 }
 
+// ---------- showing a viewing ----------
+
+var MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+  'September', 'October', 'November', 'December'];
+var SOURCE_LABELS = { streaming: 'Streaming', disc: 'Disc', tv: 'TV', pirated: 'Pirated', other: 'Other' };
+var DEVICE_LABELS = { tv: 'TV', laptop: 'Laptop', phone: 'Phone', tablet: 'Tablet', projector: 'Projector' };
+
+// All of these read the YYYY-MM-DD text directly, so they give the same answer
+// in every time zone.
+function monthName(watchedOn) {
+  return MONTH_NAMES[Number(watchedOn.slice(5, 7)) - 1];
+}
+
+function monthLabel(watchedOn) {
+  return monthName(watchedOn) + ' ' + watchedOn.slice(0, 4);
+}
+
+function longDate(watchedOn) {
+  return Number(watchedOn.slice(8, 10)) + ' ' + monthName(watchedOn) + ' ' + watchedOn.slice(0, 4);
+}
+
+function stubDate(watchedOn) {
+  return { month: monthName(watchedOn).slice(0, 3).toUpperCase(), day: watchedOn.slice(8, 10) };
+}
+
+// 4.5 becomes four stars and a half sign; null becomes ''.
+function starsText(rating) {
+  if (rating === null || rating === undefined) return '';
+  var text = '';
+  for (var i = 0; i < Math.floor(rating); i++) text += '\u2605';
+  return rating % 1 === 0 ? text : text + '\u00bd';
+}
+
+// Whole amounts stay plain ($14); anything else gets two decimals ($10.50).
+function formatPrice(price, currency) {
+  return currency + (Number.isInteger(price) ? String(price) : price.toFixed(2));
+}
+
+function addField(list, icon, text) {
+  if (typeof text === 'string' && text !== '') list.push({ icon: icon, text: text });
+}
+
+function joinParts(parts, separator) {
+  var kept = [];
+  for (var i = 0; i < parts.length; i++) {
+    if (typeof parts[i] === 'string' && parts[i] !== '') kept.push(parts[i]);
+  }
+  return kept.join(separator);
+}
+
+function cinemaFields(viewing, currency) {
+  var list = [];
+  addField(list, 'map-pin', joinParts([viewing.cinemaName, viewing.cinemaCity], ', '));
+  addField(list, 'screen', viewing.format);
+  addField(list, 'ticket', joinParts([viewing.screen ? 'Screen ' + viewing.screen : null,
+    viewing.seat ? (viewing.screen ? 'seat ' : 'Seat ') + viewing.seat : null], ', '));
+  addField(list, 'users', viewing.withWhom);
+  addField(list, 'coin', typeof viewing.price === 'number' ? formatPrice(viewing.price, currency) : null);
+  return list;
+}
+
+function homeFields(viewing) {
+  var list = [];
+  var source = viewing.source ? SOURCE_LABELS[viewing.source] : null;
+  var withService = viewing.source === 'streaming' && viewing.service ? source + ', ' + viewing.service : source;
+  addField(list, 'play', withService);
+  addField(list, 'device', viewing.device ? DEVICE_LABELS[viewing.device] : null);
+  addField(list, 'screen', viewing.format);
+  addField(list, 'users', viewing.withWhom);
+  return list;
+}
+
+// The filled-in detail rows for a stub, in display order: [{ icon, text }].
+// Blank fields are left out. A bare viewing has none.
+function stubFields(viewing, currency) {
+  if (viewing.where === 'cinema') return cinemaFields(viewing, currency);
+  if (viewing.where === 'home') return homeFields(viewing);
+  return [];
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     VIEWING_WHERE: VIEWING_WHERE,
@@ -182,6 +262,12 @@ if (typeof module !== 'undefined' && module.exports) {
     cleanViewing: cleanViewing,
     makeBareViewing: makeBareViewing,
     compareViewingsNewestFirst: compareViewingsNewestFirst,
-    filmRatingFromViewings: filmRatingFromViewings
+    filmRatingFromViewings: filmRatingFromViewings,
+    monthLabel: monthLabel,
+    longDate: longDate,
+    stubDate: stubDate,
+    starsText: starsText,
+    formatPrice: formatPrice,
+    stubFields: stubFields
   };
 }
