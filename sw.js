@@ -23,6 +23,7 @@ var SHELL_FILES = [
   'index.html',
   'styles.css',
   'settings.js',
+  'html.js',
   'viewings.js',
   'db.js',
   'progress.js',
