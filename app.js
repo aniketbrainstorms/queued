@@ -13,6 +13,7 @@ var viewCopy = {
   watching: ['WATCHING', 'Keep the story moving', 'Pick up where you left off.'],
   watchlist: ['WATCHLIST', 'What’s next?', 'Save something for later.'],
   watched: ['WATCHED', 'Your viewing history', 'Everything you’ve finished.'],
+  diary: ['DIARY', 'Every night in the dark', 'Each time you pressed play.'],
   collections: ['LISTS', 'Your collections', 'Hand-made lists will live here.']
 };
 
@@ -182,6 +183,16 @@ async function render() {
   byId('view-description').textContent = copy[2];
   var grid = byId('library-grid');
 
+  var isDiary = currentView === 'diary';
+  grid.hidden = isDiary;
+  byId('diary-panel').hidden = !isDiary;
+  byId('rule-label').textContent = isDiary ? 'THE DIARY' : 'THE SHELF';
+  if (isDiary) {
+    currentTitles = [];
+    await renderDiary(token);
+    return;
+  }
+
   if (currentView === 'collections') {
     currentTitles = [];
     byId('shelf-count').textContent = '0 LISTS';
@@ -258,6 +269,8 @@ async function showDetail(key, fromFraction) {
   var detail = byId('detail-content');
   var record = title.type === 'tv' && title.status === 'watching' ? await getProgress(key) : null;
   var overview = title.snapshot && title.snapshot.overview || 'No overview saved.';
+  detailKey = key;
+  var viewings = title.type === 'movie' ? await getViewings(key) : null;
 
   detail.innerHTML =
     '<div class="sheet-heading"><div><p class="eyebrow">' + kindLabel(title.type) + '</p><h2>' + escapeHtml(title.title) + '</h2></div>' +
@@ -265,6 +278,7 @@ async function showDetail(key, fromFraction) {
     '<div class="detail-copy">' + poster(title.posterPath, title.title, title.key, 'detail-poster') +
     '<div class="copy-text"><p class="muted">' + metaLine(title) + '</p><p>' + escapeHtml(overview) + '</p></div></div>' +
     progressBlock(record, fromFraction) + statusRowHtml(title.status) +
+    (viewings ? viewingsBlockHtml(viewings, title, stubOptions(false)) : '') +
     '<textarea class="notes" id="detail-notes" placeholder="Personal note…" aria-label="Personal note">' + escapeHtml(title.notes || '') + '</textarea>' +
     '<div class="button-row"><button type="button" class="ghost-button danger" id="remove-detail">Remove</button>' +
     '<button type="button" class="primary-button grow" id="save-detail">Save changes</button></div>';
@@ -288,13 +302,97 @@ async function saveDetail(key) {
   closeDialog('detail-dialog');
   showToast('Saved');
   render();
+  flushLogPrompt();
 }
 
 async function removeFromDetail(key) {
+  var button = byId('remove-detail');
+  var count = (await getViewings(key)).length;
+  if (count > 0 && button.getAttribute('data-confirm') !== 'yes') {
+    button.setAttribute('data-confirm', 'yes');
+    button.textContent = 'Tap again: also deletes ' + count + (count === 1 ? ' viewing' : ' viewings');
+    return;
+  }
   await removeTitle(key);
   closeDialog('detail-dialog');
   showToast('Removed from library');
   render();
+}
+
+// ---------- viewings: stubs, the Diary, the prompt ----------
+
+var diaryFilter = 'all';
+var detailKey = null;          // the film the detail sheet is showing
+var pendingLogPrompt = null;   // a movie that just became Watched and has not been asked about yet
+
+function stubThumb(title) { return poster(title.posterPath, '', title.key, 'stub-thumb'); }
+
+function stubOptions(compact) {
+  return { currency: loadCurrencySymbol(), icon: icon, poster: stubThumb, compact: !!compact };
+}
+
+function titlesByKey(list) {
+  var map = {};
+  for (var i = 0; i < list.length; i++) map[list[i].key] = list[i];
+  return map;
+}
+
+async function renderDiary(token) {
+  var viewings = await getAllViewings();
+  var titles = titlesByKey(await getAllTitles());
+  if (token !== renderToken) return; // a newer render took over
+  var shown = filterViewings(viewings, diaryFilter).length;
+  byId('shelf-count').textContent = shown + (shown === 1 ? ' VIEWING' : ' VIEWINGS');
+  byId('diary-panel').innerHTML = diaryHtml(viewings, titles, diaryFilter, stubOptions(false));
+}
+
+function onDiaryClick(event) {
+  var chip = event.target.closest('[data-filter]');
+  if (chip) {
+    diaryFilter = chip.getAttribute('data-filter');
+    render();
+    return;
+  }
+  var stub = event.target.closest('[data-viewing-id]');
+  if (stub) openViewingSheet({ viewingId: stub.getAttribute('data-viewing-id') });
+}
+
+function onStubKeydown(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  var stub = event.target.closest('[data-viewing-id]');
+  if (!stub) return;
+  event.preventDefault();
+  openViewingSheet({ viewingId: stub.getAttribute('data-viewing-id') });
+}
+
+function onDetailClick(event) {
+  if (event.target.closest('#log-another')) {
+    openViewingSheet({ titleKey: detailKey });
+    return;
+  }
+  var stub = event.target.closest('[data-viewing-id]');
+  if (stub) openViewingSheet({ viewingId: stub.getAttribute('data-viewing-id') });
+}
+
+// Redraws just the Viewings block, so notes typed in the detail sheet are kept.
+async function refreshViewingsBlock(key) {
+  var block = byId('viewings-block');
+  var title = await getTitle(key);
+  if (!block || !title) return;
+  block.outerHTML = viewingsBlockHtml(await getViewings(key), title, stubOptions(false));
+}
+
+// Called by the log sheet after a viewing is saved or deleted.
+async function onViewingsChanged(key) {
+  if (byId('detail-dialog').open && detailKey === key) await refreshViewingsBlock(key);
+  if (currentView === 'diary') render();
+}
+
+// Asks "Log details?" once the dialogs from the status change have closed.
+function flushLogPrompt() {
+  var key = pendingLogPrompt;
+  pendingLogPrompt = null;
+  if (key) showLogPrompt(key);
 }
 
 // ---------- episode stepping ----------
@@ -366,6 +464,7 @@ async function changeStatus(title, status) {
   if (status === title.status) return;
   if (status === 'watched') await markWatched(title.key); else await setStatus(title.key, status);
   if (status === 'watching') await ensureProgress(title);
+  if (status === 'watched' && title.type === 'movie') pendingLogPrompt = title.key;
 }
 
 // ---------- search and add ----------
@@ -445,6 +544,7 @@ async function addFromPreview(status) {
     closeDialog('search-dialog');
     showToast('Added to ' + statusLabel(status));
     render();
+    flushLogPrompt();
   } catch (err) {
     showToast(err.code === 'DUPLICATE' ? 'Already in your library' : err.message || 'Could not add title');
   }
@@ -460,6 +560,7 @@ function openSearch() {
 function openSettings() {
   var info = loadStoredKey();
   byId('tmdb-key').value = '';
+  byId('currency-symbol').value = loadCurrencySymbol();
   byId('key-state').textContent = info ? 'Saved key: ' + maskKey(info.key) : 'No key saved yet.';
   byId('settings-dialog').showModal();
 }
@@ -488,6 +589,23 @@ async function handleSaveKey() {
   field.value = '';
   state.textContent = check.ok ? 'Key saved and working.' : 'Key saved, but TMDB could not be reached to test it.';
   showToast('TMDB key saved');
+}
+
+var CURRENCY_MESSAGES = {
+  empty: 'Enter a symbol, like $.',
+  long: 'Use up to 3 characters.',
+  storage: 'Could not save the symbol.'
+};
+
+function onCurrencyChange(event) {
+  var saved = saveCurrencySymbol(event.target.value);
+  if (!saved.ok) {
+    event.target.value = loadCurrencySymbol();
+    showToast(CURRENCY_MESSAGES[saved.reason]);
+    return;
+  }
+  showToast('Price symbol saved');
+  if (currentView === 'diary') render();
 }
 
 function handleClearKey() {
@@ -576,6 +694,12 @@ function init() {
   document.addEventListener('click', onDocumentClick);
   byId('library-grid').addEventListener('click', onGridClick);
   byId('library-grid').addEventListener('keydown', onGridKeydown);
+  byId('diary-panel').addEventListener('click', onDiaryClick);
+  byId('diary-panel').addEventListener('keydown', onStubKeydown);
+  byId('detail-content').addEventListener('click', onDetailClick);
+  byId('detail-content').addEventListener('keydown', onStubKeydown);
+  byId('currency-symbol').addEventListener('change', onCurrencyChange);
+  initViewingSheet();
   byId('search-button').addEventListener('click', openSearch);
   byId('search-form').addEventListener('submit', searchTitles);
   byId('search-results').addEventListener('click', onResultsClick);
