@@ -49,14 +49,16 @@
       <span class="toolbar-note">A little archive<br>of your own.</span>
     </section>
 
-    <div class="section-rule"><span>THE SHELF</span><span id="shelf-count">0 TITLES</span></div>
+    <div class="section-rule"><span id="rule-label">THE SHELF</span><span id="shelf-count">0 TITLES</span></div>
     <section class="grid" id="library-grid" aria-live="polite"></section>
+    <section class="diary" id="diary-panel" aria-live="polite" hidden></section>
   </main>
 
   <nav class="bottom-bar" aria-label="Library views">
     <button type="button" data-view="watching"><span data-icon="play"></span>Watching</button>
     <button type="button" data-view="watchlist" class="active" aria-current="page"><span data-icon="bookmark"></span>Watchlist</button>
     <button type="button" data-view="watched"><span data-icon="check"></span>Watched</button>
+    <button type="button" data-view="diary"><span data-icon="ticket"></span>Diary</button>
     <button type="button" data-view="collections"><span data-icon="grid"></span>Lists</button>
   </nav>
 
@@ -74,7 +76,11 @@
     </form>
   </dialog>
 
-  <dialog id="detail-dialog" class="sheet" aria-label="Title details"><div class="sheet-content" id="detail-content"></div></dialog>
+<dialog id="detail-dialog" class="sheet" aria-label="Title details"><div class="sheet-content" id="detail-content"></div></dialog>
+
+  <dialog id="viewing-dialog" class="sheet" aria-label="Log a viewing"><div class="sheet-content" id="viewing-content"></div></dialog>
+
+  <dialog id="log-prompt-dialog" class="sheet" aria-label="Log details?"><div class="sheet-content" id="log-prompt-content"></div></dialog>
 
   <dialog id="settings-dialog" class="sheet" aria-labelledby="settings-title">
     <form method="dialog" class="sheet-content" id="settings-form">
@@ -90,6 +96,9 @@
         <button class="primary-button grow" type="button" id="save-key">Save and test</button>
         <button class="ghost-button" type="button" id="clear-key">Clear</button>
       </div>
+      <label class="field-label" for="currency-symbol">Ticket price symbol</label>
+      <input id="currency-symbol" type="text" maxlength="3" autocomplete="off" placeholder="$">
+      <p class="small muted">Shown next to cinema ticket prices. It is only a label; nothing is converted.</p>
       <hr>
       <button class="ghost-button full-width" type="button" id="import-button">Import JSON backup</button>
       <input id="import-file" type="file" accept="application/json" hidden>
@@ -99,6 +108,6 @@
 
   <div id="toast" class="toast" role="status"></div>
 </div>
-<script src="settings.js"></script><script src="html.js"></script><script src="viewings.js"></script><script src="db.js"></script><script src="progress.js"></script><script src="tmdb.js"></script><script src="app.js"></script>
+<script src="settings.js"></script><script src="html.js"></script><script src="viewings.js"></script><script src="db.js"></script><script src="progress.js"></script><script src="tmdb.js"></script><script src="diary.js"></script><script src="viewing_sheet.js"></script><script src="app.js"></script>
 </body>
 </html>
