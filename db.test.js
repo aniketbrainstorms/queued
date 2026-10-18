@@ -393,7 +393,7 @@ test('exportAll returns a versioned snapshot without log or item ids, and withou
   assert.equal(data.version, db.EXPORT_VERSION);
   assert.ok(!Number.isNaN(Date.parse(data.exportedAt)));
   assert.deepEqual(Object.keys(data).sort(),
-    ['app', 'exportedAt', 'listItems', 'lists', 'progress', 'titles', 'version', 'watchLog']);
+    ['app', 'exportedAt', 'listItems', 'lists', 'progress', 'titles', 'version', 'viewings', 'watchLog']);
   assert.equal(data.titles.length, 1);
   assert.equal(data.progress.length, 1);
   assert.deepEqual(Object.keys(data.watchLog[0]).sort(), ['at', 'episode', 'season', 'titleKey']);
@@ -437,7 +437,7 @@ test('importing the same file twice changes nothing the second time', async () =
   const second = await db.importAll(file);
   assert.deepEqual(second, {
     titlesAdded: 0, titlesUpdated: 0, titlesKept: 2, progressWritten: 0,
-    logAdded: 0, listsAdded: 0, listItemsAdded: 0, skipped: 0
+    logAdded: 0, listsAdded: 0, listItemsAdded: 0, viewingsAdded: 0, viewingsCreated: 0, skipped: 0
   });
   assert.equal((await db.getWatchLog()).length, 3);
   assert.equal((await db.getLists()).length, 2);
@@ -600,4 +600,351 @@ test('deleteDb erases everything', async () => {
   await db.addTitle(movie(1));
   await db.deleteDb();
   assert.equal((await db.getAllTitles()).length, 0);
+});
+
+// ---------- viewings: schema version 2 and migration ----------
+
+const viewingsLib = require('./viewings.js');
+
+function idbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function idbTxDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Builds a database exactly as version 1 of Queued left it, then closes it,
+// so the next openDb() has to upgrade it.
+async function seedVersion1(titles, logEntries) {
+  await db.deleteDb();
+  const open = indexedDB.open('queued-db', 1);
+  open.onupgradeneeded = () => {
+    const d = open.result;
+    const t = d.createObjectStore('titles', { keyPath: 'key' });
+    t.createIndex('status', 'status');
+    t.createIndex('type', 'type');
+    d.createObjectStore('progress', { keyPath: 'key' });
+    const l = d.createObjectStore('watch_log', { keyPath: 'id', autoIncrement: true });
+    l.createIndex('titleKey', 'titleKey');
+    l.createIndex('at', 'at');
+    d.createObjectStore('lists', { keyPath: 'id', autoIncrement: true });
+    const i = d.createObjectStore('list_items', { keyPath: 'id', autoIncrement: true });
+    i.createIndex('listId', 'listId');
+    i.createIndex('titleKey', 'titleKey');
+    const c = d.createObjectStore('cache', { keyPath: 'key' });
+    c.createIndex('expiresAt', 'expiresAt');
+  };
+  const conn = await idbRequest(open);
+  const tx = conn.transaction(['titles', 'watch_log'], 'readwrite');
+  for (const t of titles) tx.objectStore('titles').put(t);
+  for (const e of logEntries) tx.objectStore('watch_log').add(e);
+  await idbTxDone(tx);
+  conn.close();
+}
+
+async function rawViewings() {
+  const conn = await db.openDb();
+  const tx = conn.transaction('viewings', 'readonly');
+  return idbRequest(tx.objectStore('viewings').getAll());
+}
+
+function oldTitle(id, type, status, updatedAt) {
+  return {
+    key: type + ':' + id, type: type, title: 'T' + id, status: status,
+    addedAt: '2026-01-01T00:00:00.000Z', updatedAt: updatedAt
+  };
+}
+
+test('a new database has a viewings store with titleKey and watchedOn indexes', async () => {
+  const conn = await db.openDb();
+  assert.ok(conn.objectStoreNames.contains('viewings'));
+  const store = conn.transaction('viewings', 'readonly').objectStore('viewings');
+  assert.ok(store.indexNames.contains('titleKey'));
+  assert.ok(store.indexNames.contains('watchedOn'));
+  assert.equal(conn.version, 2);
+});
+
+test('upgrading from version 1 gives each watched movie one bare viewing', async () => {
+  await seedVersion1(
+    [
+      oldTitle(1, 'movie', 'watched', '2026-05-01T12:00:00.000Z'),
+      oldTitle(2, 'movie', 'watched', '2026-03-03T12:00:00.000Z'),
+      oldTitle(3, 'movie', 'watchlist', '2026-03-03T12:00:00.000Z'),
+      oldTitle(4, 'tv', 'watched', '2026-03-03T12:00:00.000Z'),
+      oldTitle(5, 'movie', 'watched', '2999-01-01T12:00:00.000Z')
+    ],
+    [
+      { titleKey: 'movie:1', season: null, episode: null, at: '2026-04-02T12:00:00.000Z' },
+      { titleKey: 'movie:1', season: null, episode: null, at: '2026-04-10T12:00:00.000Z' },
+      { titleKey: 'tv:4', season: 1, episode: 1, at: '2026-03-04T12:00:00.000Z' }
+    ]
+  );
+  const all = await rawViewings();
+  all.sort((a, b) => (a.titleKey < b.titleKey ? -1 : 1));
+  assert.deepEqual(all.map((x) => x.titleKey), ['movie:1', 'movie:2', 'movie:5']);
+  assert.equal(all[0].watchedOn, viewingsLib.localDateString(new Date('2026-04-10T12:00:00.000Z')));
+  assert.equal(all[1].watchedOn, viewingsLib.localDateString(new Date('2026-03-03T12:00:00.000Z')));
+  assert.equal(all[2].watchedOn, viewingsLib.localDateString(new Date()));
+  for (const x of all) {
+    assert.equal(x.where, null);
+    assert.equal(x.rating, null);
+    assert.match(x.id, /^v_[a-z0-9]+_[a-z0-9]+$/);
+  }
+});
+
+test('upgrading keeps the titles and the log that were already there', async () => {
+  await seedVersion1(
+    [oldTitle(1, 'movie', 'watched', '2026-05-01T12:00:00.000Z')],
+    [{ titleKey: 'movie:1', season: null, episode: null, at: '2026-04-02T12:00:00.000Z' }]
+  );
+  assert.equal((await db.getTitle('movie:1')).title, 'T1');
+  assert.equal((await db.getWatchLog('movie:1')).length, 1);
+});
+
+// ---------- viewings: add, update, delete, read ----------
+
+function addedMovie(id, status) {
+  return db.addTitle(movie(id, status || 'watchlist'));
+}
+
+test('addViewing saves a clean viewing and returns it', async () => {
+  await addedMovie(1);
+  const saved = await db.addViewing({
+    titleKey: 'movie:1', watchedOn: '2026-10-01', where: 'cinema',
+    cinemaName: ' Starlight ', price: 14, rating: 4.5, note: 'loud'
+  });
+  assert.match(saved.id, /^v_[a-z0-9]+_[a-z0-9]+$/);
+  assert.equal(saved.cinemaName, 'Starlight');
+  assert.equal(saved.createdAt, saved.updatedAt);
+  assert.deepEqual(await db.getViewings('movie:1'), [saved]);
+});
+
+test('addViewing ignores an id the caller supplies', async () => {
+  await addedMovie(1);
+  const saved = await db.addViewing({ id: 'v_mine_1', titleKey: 'movie:1', watchedOn: '2026-10-01' });
+  assert.notEqual(saved.id, 'v_mine_1');
+});
+
+test('addViewing rejects bad input and unknown films', async () => {
+  await addedMovie(1);
+  await assert.rejects(db.addViewing({ titleKey: 'movie:1', watchedOn: '2999-01-01' }), { code: 'INVALID' });
+  await assert.rejects(db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-10-01', rating: 9 }), { code: 'INVALID' });
+  await assert.rejects(db.addViewing({ titleKey: 'tv:1', watchedOn: '2026-10-01' }), { code: 'INVALID' });
+  await assert.rejects(db.addViewing({ titleKey: 'movie:99', watchedOn: '2026-10-01' }), { code: 'NOT_FOUND' });
+  assert.deepEqual(await db.getAllViewings(), []);
+});
+
+test('a film can have several viewings, newest first', async () => {
+  await addedMovie(1);
+  await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-01-01' });
+  await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-06-01' });
+  await addedMovie(2);
+  await db.addViewing({ titleKey: 'movie:2', watchedOn: '2026-03-01' });
+  assert.deepEqual((await db.getViewings('movie:1')).map((x) => x.watchedOn), ['2026-06-01', '2026-01-01']);
+  assert.deepEqual((await db.getAllViewings()).map((x) => x.watchedOn), ['2026-06-01', '2026-03-01', '2026-01-01']);
+});
+
+test('updateViewing merges changes and keeps id, film and createdAt', async () => {
+  await addedMovie(1);
+  const saved = await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-10-01', where: 'cinema', cinemaName: 'Odeon', seat: 'A1' });
+  const next = await db.updateViewing(saved.id, { where: 'home', source: 'streaming', service: 'Max', titleKey: 'movie:2', id: 'v_x_1' });
+  assert.equal(next.id, saved.id);
+  assert.equal(next.titleKey, 'movie:1');
+  assert.equal(next.createdAt, saved.createdAt);
+  assert.equal(next.where, 'home');
+  assert.equal(next.service, 'Max');
+  assert.equal(next.cinemaName, null);
+  assert.equal(next.seat, null);
+});
+
+test('updateViewing rejects bad changes without writing them', async () => {
+  await addedMovie(1);
+  const saved = await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-10-01', rating: 3 });
+  await assert.rejects(db.updateViewing(saved.id, { rating: 9 }), { code: 'INVALID' });
+  await assert.rejects(db.updateViewing('v_nope_1', { rating: 4 }), { code: 'NOT_FOUND' });
+  assert.equal((await db.getViewings('movie:1'))[0].rating, 3);
+});
+
+test('deleteViewing removes it and reports whether it existed', async () => {
+  await addedMovie(1);
+  const saved = await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-10-01' });
+  assert.equal(await db.deleteViewing(saved.id), true);
+  assert.equal(await db.deleteViewing(saved.id), false);
+  assert.deepEqual(await db.getViewings('movie:1'), []);
+});
+
+test('deleting a viewing never changes the film status', async () => {
+  await addedMovie(1, 'watched');
+  const saved = await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-10-01' });
+  await db.deleteViewing(saved.id);
+  assert.equal((await db.getTitle('movie:1')).status, 'watched');
+});
+
+test('the film rating follows its latest rated viewing', async () => {
+  await addedMovie(1);
+  assert.equal((await db.getTitle('movie:1')).rating ?? null, null);
+  const first = await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-01-01', rating: 3 });
+  assert.equal((await db.getTitle('movie:1')).rating, 3);
+  const second = await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-06-01', rating: 4.5 });
+  assert.equal((await db.getTitle('movie:1')).rating, 4.5);
+  await db.updateViewing(second.id, { rating: null });
+  assert.equal((await db.getTitle('movie:1')).rating, 3);
+  await db.deleteViewing(first.id);
+  assert.equal((await db.getTitle('movie:1')).rating, null);
+});
+
+// ---------- viewings: made whenever a movie becomes watched ----------
+
+const TODAY = viewingsLib.localDateString(new Date());
+
+test('markWatched adds one bare viewing dated today', async () => {
+  await db.addTitle(movie(1, 'watchlist'));
+  await db.markWatched('movie:1');
+  const list = await db.getViewings('movie:1');
+  assert.equal(list.length, 1);
+  assert.equal(list[0].watchedOn, TODAY);
+  assert.equal(list[0].where, null);
+});
+
+test('markWatched on a film that is already watched adds nothing', async () => {
+  await db.addTitle(movie(1, 'watchlist'));
+  await db.markWatched('movie:1');
+  await db.markWatched('movie:1');
+  assert.equal((await db.getViewings('movie:1')).length, 1);
+});
+
+test('markWatched on a series adds no viewing', async () => {
+  await db.addTitle(series(1, 'watching'));
+  await db.markWatched('tv:1');
+  assert.deepEqual(await db.getAllViewings(), []);
+});
+
+test('setStatus to watched adds a viewing once, other changes add none', async () => {
+  await db.addTitle(movie(1, 'watching'));
+  await db.updateTitle('movie:1', { notes: 'hello' });
+  assert.equal((await db.getViewings('movie:1')).length, 0);
+  await db.setStatus('movie:1', 'watched');
+  assert.equal((await db.getViewings('movie:1')).length, 1);
+  await db.setStatus('movie:1', 'watched');
+  assert.equal((await db.getViewings('movie:1')).length, 1);
+});
+
+test('un-watching a film keeps its viewings', async () => {
+  await db.addTitle(movie(1, 'watchlist'));
+  await db.markWatched('movie:1');
+  await db.setStatus('movie:1', 'watchlist');
+  assert.equal((await db.getViewings('movie:1')).length, 1);
+});
+
+test('adding a movie straight as watched adds a viewing; as watchlist does not', async () => {
+  await db.addTitle(movie(1, 'watched'));
+  await db.addTitle(movie(2, 'watchlist'));
+  await db.addTitle(series(3, 'watched'));
+  assert.equal((await db.getViewings('movie:1')).length, 1);
+  assert.deepEqual(await db.getViewings('movie:2'), []);
+  assert.deepEqual(await db.getViewings('tv:3'), []);
+});
+
+test('a failed addTitle leaves no stray viewing', async () => {
+  await db.addTitle(movie(1, 'watched'));
+  await assert.rejects(db.addTitle(movie(1, 'watched')), { code: 'DUPLICATE' });
+  assert.equal((await db.getAllViewings()).length, 1);
+});
+
+test('removeTitle deletes that film\'s viewings and no others', async () => {
+  await db.addTitle(movie(1, 'watched'));
+  await db.addTitle(movie(2, 'watched'));
+  await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-01-01' });
+  await db.removeTitle('movie:1');
+  assert.deepEqual(await db.getViewings('movie:1'), []);
+  assert.equal((await db.getViewings('movie:2')).length, 1);
+});
+
+// ---------- viewings: backup version 2 ----------
+
+test('exportAll includes viewings, newest first, at format version 2', async () => {
+  await db.addTitle(movie(1, 'watchlist'));
+  await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-01-01' });
+  await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-06-01', where: 'home', source: 'disc' });
+  const data = await db.exportAll();
+  assert.equal(data.version, 2);
+  assert.deepEqual(data.viewings.map((x) => x.watchedOn), ['2026-06-01', '2026-01-01']);
+});
+
+test('viewings survive an export and import into an empty library', async () => {
+  await db.addTitle(movie(1, 'watchlist'));
+  await db.addViewing({
+    titleKey: 'movie:1', watchedOn: '2026-03-09', where: 'cinema', cinemaName: 'Starlight',
+    price: 14, rating: 4.5, note: 'loud'
+  });
+  const before = await db.exportAll();
+  await db.deleteDb();
+  const summary = await db.importAll(JSON.stringify(before));
+  assert.equal(summary.viewingsAdded, 1);
+  assert.equal(summary.viewingsCreated, 0);
+  assert.equal(summary.skipped, 0);
+  assert.deepEqual((await db.exportAll()).viewings, before.viewings);
+  assert.equal((await db.getTitle('movie:1')).rating, 4.5);
+});
+
+test('importing viewings twice adds them once', async () => {
+  await db.addTitle(movie(1, 'watchlist'));
+  await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-03-09' });
+  const file = await db.exportAll();
+  const second = await db.importAll(file);
+  assert.equal(second.viewingsAdded, 0);
+  assert.equal((await db.getViewings('movie:1')).length, 1);
+});
+
+test('viewings from two devices are merged by id', async () => {
+  await db.addTitle(movie(1, 'watchlist'));
+  const mine = await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-03-09' });
+  const theirs = Object.assign({}, mine, { id: 'v_other_1', watchedOn: '2026-04-01' });
+  const file = backup({ version: 2, titles: [movie(1, 'watchlist')], viewings: [theirs] });
+  const summary = await db.importAll(file);
+  assert.equal(summary.viewingsAdded, 1);
+  assert.deepEqual((await db.getViewings('movie:1')).map((x) => x.id), ['v_other_1', mine.id]);
+});
+
+test('a version 1 backup imports, and watched movies get a bare viewing', async () => {
+  const file = backup({ version: 1, titles: [movie(1, 'watched'), movie(2, 'watchlist'), series(3, 'watched')] });
+  assert.equal(file.viewings, undefined);
+  const summary = await db.importAll(file);
+  assert.equal(summary.viewingsCreated, 1);
+  assert.equal((await db.getViewings('movie:1')).length, 1);
+  assert.deepEqual(await db.getViewings('movie:2'), []);
+  assert.deepEqual(await db.getViewings('tv:3'), []);
+});
+
+test('a watched movie that already has a viewing gets no extra one on import', async () => {
+  await db.addTitle(movie(1, 'watched'));
+  const summary = await db.importAll(backup({ version: 1, titles: [movie(1, 'watched')] }));
+  assert.equal(summary.viewingsCreated, 0);
+  assert.equal((await db.getViewings('movie:1')).length, 1);
+});
+
+test('invalid viewings and viewings for unknown films are skipped and counted', async () => {
+  const good = { id: 'v_good_1', titleKey: 'movie:1', watchedOn: '2026-03-09' };
+  const badDate = { id: 'v_bad_1', titleKey: 'movie:1', watchedOn: '2026-02-30' };
+  const orphan = { id: 'v_orphan_1', titleKey: 'movie:99', watchedOn: '2026-03-09' };
+  const file = backup({ version: 2, titles: [movie(1, 'watchlist')], viewings: [good, badDate, orphan] });
+  const summary = await db.importAll(file);
+  assert.equal(summary.viewingsAdded, 1);
+  assert.equal(summary.skipped, 2);
+  assert.deepEqual((await db.getAllViewings()).map((x) => x.id), ['v_good_1']);
+});
+
+test('a backup with viewings must still be a list', async () => {
+  await assert.rejects(db.importAll(backup({ version: 2, viewings: 'x' })), { code: 'INVALID' });
+});
+
+test('a backup from a newer version is still refused', async () => {
+  await assert.rejects(db.importAll({ app: 'queued', version: 3 }), { code: 'INVALID' });
 });

@@ -6,6 +6,7 @@
 //   titles     key 'movie:<id>' | 'tv:<id>'   one record per movie or series
 //   progress   key = title key                series only: season, episode, seasons
 //   watch_log  auto id, append-only           { titleKey, season, episode, at }
+//   viewings   key = id ('v_...')             one record per time a movie was watched (see viewings.js)
 //   lists      auto id                        { id, name, createdAt }
 //   list_items auto id                        { id, listId, titleKey, position }
 //   cache      key                            TMDB responses with an expiry
@@ -17,13 +18,13 @@
 'use strict';
 
 var DB_NAME = 'queued-db';
-var DB_VERSION = 1;
+var DB_VERSION = 2;
 var STATUSES = ['watchlist', 'watching', 'watched'];
 var TITLE_KEY_PATTERN = /^(movie|tv):[1-9][0-9]*$/;
 
 // Backup file format. Bump EXPORT_VERSION when the file shape changes.
 var EXPORT_APP = 'queued';
-var EXPORT_VERSION = 1;
+var EXPORT_VERSION = 2;
 
 var dbPromise = null;
 
@@ -79,10 +80,33 @@ function txDone(tx) {
   return new Promise(txExecutor.bind(null, tx));
 }
 
-function handleUpgradeNeeded(event) {
-  // Version 1 creates everything. Future versions: branch on event.oldVersion.
-  var db = event.target.result;
+// Reaches viewings.js in both environments: require() under Node, the globals
+// defined by the earlier <script> tag in the browser.
+function viewingsLib() {
+  if (typeof module !== 'undefined' && module.exports) return require('./viewings.js');
+  return {
+    cleanViewing: cleanViewing,
+    makeBareViewing: makeBareViewing,
+    makeViewingId: makeViewingId,
+    localDateString: localDateString,
+    filmRatingFromViewings: filmRatingFromViewings,
+    compareViewingsNewestFirst: compareViewingsNewestFirst
+  };
+}
 
+function handleUpgradeNeeded(event) {
+  var db = event.target.result;
+  if (event.oldVersion < 1) createVersion1Stores(db);
+  if (event.oldVersion < 2) {
+    var viewings = db.createObjectStore('viewings', { keyPath: 'id' });
+    viewings.createIndex('titleKey', 'titleKey');
+    viewings.createIndex('watchedOn', 'watchedOn');
+    // A brand new database has no films to carry over.
+    if (event.oldVersion >= 1) startViewingsMigration(event.target.transaction);
+  }
+}
+
+function createVersion1Stores(db) {
   var titles = db.createObjectStore('titles', { keyPath: 'key' });
   titles.createIndex('status', 'status');
   titles.createIndex('type', 'type');
@@ -101,6 +125,61 @@ function handleUpgradeNeeded(event) {
 
   var cache = db.createObjectStore('cache', { keyPath: 'key' });
   cache.createIndex('expiresAt', 'expiresAt');
+}
+
+// ----- version 2: one bare viewing for each film already marked watched -----
+
+// Runs inside the upgrade transaction. If anything fails the transaction is
+// aborted, so the upgrade fails as a whole and the database stays at version 1.
+function startViewingsMigration(tx) {
+  addMissingBareViewings(tx).catch(abortQuietly.bind(null, tx));
+}
+
+// The latest log date for each movie: { 'movie:1': '2026-04-10T12:00:00.000Z' }.
+function latestMovieLogDates(entries) {
+  var latest = Object.create(null);
+  for (var i = 0; i < entries.length; i++) {
+    var entry = entries[i];
+    if (entry.season !== null || entry.episode !== null) continue;
+    if (!latest[entry.titleKey] || timeOf(entry.at) > timeOf(latest[entry.titleKey])) {
+      latest[entry.titleKey] = entry.at;
+    }
+  }
+  return latest;
+}
+
+// The day a watched film was probably watched: its latest log entry, else when
+// the title was last updated. Never later than today.
+function guessWatchedOn(title, latest, today) {
+  var source = latest[title.key] || title.updatedAt || title.addedAt;
+  if (!isValidDate(source)) return today;
+  var day = viewingsLib().localDateString(new Date(source));
+  return day > today ? today : day;
+}
+
+// Gives every watched movie that has no viewing one bare viewing. Used by the
+// version 2 upgrade and after an import. Runs inside the caller's transaction
+// (titles, watch_log and viewings). Returns how many it added.
+async function addMissingBareViewings(tx) {
+  var lib = viewingsLib();
+  var titles = await requestToPromise(tx.objectStore('titles').index('status').getAll('watched'));
+  var held = await requestToPromise(tx.objectStore('viewings').getAll());
+  var entries = await requestToPromise(tx.objectStore('watch_log').getAll());
+  var hasViewing = Object.create(null);
+  for (var i = 0; i < held.length; i++) hasViewing[held[i].titleKey] = true;
+  var latest = latestMovieLogDates(entries);
+  var store = tx.objectStore('viewings');
+  var now = nowIso();
+  var today = lib.localDateString(new Date());
+  var added = 0;
+  for (var j = 0; j < titles.length; j++) {
+    if (titles[j].type !== 'movie' || hasViewing[titles[j].key]) continue;
+    var day = guessWatchedOn(titles[j], latest, today);
+    var id = lib.makeViewingId(Date.now(), Math.random());
+    store.add(lib.makeBareViewing(titles[j].key, id, { today: day, now: now }));
+    added++;
+  }
+  return added;
 }
 
 // Another tab wants to upgrade or delete the database: let go of it.
@@ -268,9 +347,10 @@ async function addTitle(record) {
     updatedAt: now
   });
   var db = await openDb();
-  var tx = db.transaction('titles', 'readwrite');
+  var tx = db.transaction(['titles', 'viewings'], 'readwrite');
   var done = txDone(tx);
   tx.objectStore('titles').add(full);
+  if (full.type === 'movie' && full.status === 'watched') addBareViewing(tx, full.key, now);
   try {
     await done;
   } catch (err) {
@@ -288,7 +368,7 @@ async function updateTitle(key, changes) {
     throw new DbError('INVALID', 'status must be watchlist, watching or watched');
   }
   var db = await openDb();
-  var tx = db.transaction('titles', 'readwrite');
+  var tx = db.transaction(['titles', 'viewings'], 'readwrite');
   var done = txDone(tx);
   var store = tx.objectStore('titles');
   var existing = await requestToPromise(store.get(key));
@@ -303,6 +383,8 @@ async function updateTitle(key, changes) {
     updatedAt: nowIso()
   });
   store.put(merged);
+  var becameWatched = existing.type === 'movie' && existing.status !== 'watched' && merged.status === 'watched';
+  if (becameWatched) addBareViewing(tx, key, merged.updatedAt);
   await done;
   return merged;
 }
@@ -311,11 +393,11 @@ function setStatus(key, status) {
   return updateTitle(key, { status: status });
 }
 
-// Removes a title and everything that hangs off it: progress, log entries and
-// its place in any lists. Returns true if the title existed.
+// Removes a title and everything that hangs off it: progress, log entries,
+// viewings and its place in any lists. Returns true if the title existed.
 async function removeTitle(key) {
   var db = await openDb();
-  var names = ['titles', 'progress', 'watch_log', 'list_items'];
+  var names = ['titles', 'progress', 'watch_log', 'list_items', 'viewings'];
   var tx = db.transaction(names, 'readwrite');
   var done = txDone(tx);
   var titles = tx.objectStore('titles');
@@ -331,6 +413,10 @@ async function removeTitle(key) {
 
   var itemIds = await requestToPromise(items.index('titleKey').getAllKeys(key));
   for (var j = 0; j < itemIds.length; j++) items.delete(itemIds[j]);
+
+  var viewingStore = tx.objectStore('viewings');
+  var viewingIds = await requestToPromise(viewingStore.index('titleKey').getAllKeys(key));
+  for (var k = 0; k < viewingIds.length; k++) viewingStore.delete(viewingIds[k]);
 
   await done;
   return !!existing;
@@ -407,10 +493,11 @@ async function undoEpisode(key, pointer, seasons) {
 }
 
 // Sets status to watched. A movie also gets a log entry (season and episode
-// null); a series' episodes are already in the log from commitEpisode.
+// null) and, unless it was already watched, a bare viewing dated today; a
+// series' episodes are already in the log from commitEpisode.
 async function markWatched(key) {
   var db = await openDb();
-  var tx = db.transaction(['titles', 'watch_log'], 'readwrite');
+  var tx = db.transaction(['titles', 'watch_log', 'viewings'], 'readwrite');
   var done = txDone(tx);
   var titles = tx.objectStore('titles');
   var existing = await requestToPromise(titles.get(key));
@@ -423,6 +510,7 @@ async function markWatched(key) {
   titles.put(updated);
   if (existing.type === 'movie') {
     tx.objectStore('watch_log').add({ titleKey: key, season: null, episode: null, at: now });
+    if (existing.status !== 'watched') addBareViewing(tx, key, now);
   }
   await done;
   return updated;
@@ -443,6 +531,124 @@ async function getWatchLog(titleKey) {
   }
   entries.sort(compareLogEntries);
   return entries;
+}
+
+// ---------- viewings ----------
+
+// Sets the film's own rating to the rating on its latest rated viewing (or
+// null). Runs inside the caller's transaction, after its viewing write.
+async function syncFilmRating(tx, titleKey, now) {
+  var titles = tx.objectStore('titles');
+  var title = await requestToPromise(titles.get(titleKey));
+  if (!title) return;
+  var list = await requestToPromise(tx.objectStore('viewings').index('titleKey').getAll(titleKey));
+  var rating = viewingsLib().filmRatingFromViewings(list);
+  var current = title.rating === undefined ? null : title.rating;
+  if (current === rating) return;
+  titles.put(Object.assign({}, title, { rating: rating, updatedAt: now }));
+}
+
+function viewingContext(now) {
+  return { today: viewingsLib().localDateString(new Date()), now: now };
+}
+
+// Adds a viewing with no details, dated today, inside the caller's transaction
+// (which must include the viewings store). Made whenever a movie becomes
+// Watched, so every watched film is counted even if the user skips the details.
+function addBareViewing(tx, titleKey, now) {
+  var lib = viewingsLib();
+  var id = lib.makeViewingId(Date.now(), Math.random());
+  tx.objectStore('viewings').add(lib.makeBareViewing(titleKey, id, viewingContext(now)));
+}
+
+// input: the viewing's fields without id, createdAt and updatedAt (the id and
+// both dates are made here). The film must be in the library.
+async function addViewing(input) {
+  var lib = viewingsLib();
+  var now = nowIso();
+  var raw = Object.assign({}, input, {
+    id: lib.makeViewingId(Date.now(), Math.random()),
+    createdAt: now,
+    updatedAt: now
+  });
+  var clean = lib.cleanViewing(raw, viewingContext(now));
+  if (clean.error) throw new DbError('INVALID', clean.error);
+
+  var db = await openDb();
+  var tx = db.transaction(['titles', 'viewings'], 'readwrite');
+  var done = txDone(tx);
+  var title = await requestToPromise(tx.objectStore('titles').get(clean.value.titleKey));
+  if (!title) {
+    await done;
+    throw new DbError('NOT_FOUND', 'No such title: ' + clean.value.titleKey);
+  }
+  tx.objectStore('viewings').add(clean.value);
+  await syncFilmRating(tx, clean.value.titleKey, now);
+  await done;
+  return clean.value;
+}
+
+// Merges changes into a viewing. id, titleKey and createdAt cannot change.
+// Changing where drops the fields that belong to the other place.
+async function updateViewing(id, changes) {
+  var lib = viewingsLib();
+  var now = nowIso();
+  var db = await openDb();
+  var tx = db.transaction(['titles', 'viewings'], 'readwrite');
+  var done = txDone(tx);
+  var store = tx.objectStore('viewings');
+  var existing = await requestToPromise(store.get(id));
+  if (!existing) {
+    await done;
+    throw new DbError('NOT_FOUND', 'No such viewing: ' + id);
+  }
+  var merged = Object.assign({}, existing, changes, {
+    id: existing.id,
+    titleKey: existing.titleKey,
+    createdAt: existing.createdAt,
+    updatedAt: now
+  });
+  var clean = lib.cleanViewing(merged, viewingContext(now));
+  if (clean.error) {
+    abortQuietly(tx);
+    await settleQuietly(done);
+    throw new DbError('INVALID', clean.error);
+  }
+  store.put(clean.value);
+  await syncFilmRating(tx, existing.titleKey, now);
+  await done;
+  return clean.value;
+}
+
+// Returns true if the viewing existed. The film's status is not touched.
+async function deleteViewing(id) {
+  var db = await openDb();
+  var tx = db.transaction(['titles', 'viewings'], 'readwrite');
+  var done = txDone(tx);
+  var store = tx.objectStore('viewings');
+  var existing = await requestToPromise(store.get(id));
+  if (existing) {
+    store.delete(id);
+    await syncFilmRating(tx, existing.titleKey, nowIso());
+  }
+  await done;
+  return !!existing;
+}
+
+// A film's viewings, newest first.
+async function getViewings(titleKey) {
+  var db = await openDb();
+  var tx = db.transaction('viewings', 'readonly');
+  var list = await requestToPromise(tx.objectStore('viewings').index('titleKey').getAll(titleKey));
+  return list.sort(viewingsLib().compareViewingsNewestFirst);
+}
+
+// Every viewing, newest first.
+async function getAllViewings() {
+  var db = await openDb();
+  var tx = db.transaction('viewings', 'readonly');
+  var list = await requestToPromise(tx.objectStore('viewings').getAll());
+  return list.sort(viewingsLib().compareViewingsNewestFirst);
 }
 
 // ---------- lists ----------
@@ -644,7 +850,14 @@ async function purgeExpiredCache() {
 //     progress:  [progress records],
 //     watchLog:  [{ titleKey, season, episode, at }]        (no ids)
 //     lists:     [{ id, name, createdAt }]                  (id only links items)
-//     listItems: [{ listId, titleKey, position }] }
+//     listItems: [{ listId, titleKey, position }],
+//     viewings:  [viewing records, see viewings.js]          (version 2 and later)
+//   }
+//   viewings  matched by id: new ids are added, existing ones are left alone. A
+//             viewing that is invalid, or whose film is in neither the file nor
+//             the library, is skipped (counted in summary.skipped). Afterwards
+//             every watched movie with no viewing gets one bare viewing, which is
+//             how a version 1 backup becomes complete.
 // The cache is not exported, and neither is the TMDB key (it is not in this
 // database at all).
 //
@@ -665,7 +878,7 @@ async function purgeExpiredCache() {
 
 async function exportAll() {
   var db = await openDb();
-  var tx = db.transaction(['titles', 'progress', 'watch_log', 'lists', 'list_items'], 'readonly');
+  var tx = db.transaction(['titles', 'progress', 'watch_log', 'lists', 'list_items', 'viewings'], 'readonly');
   // Every request gets its handler at once (inside requestToPromise), so no
   // result can arrive before something is listening.
   var parts = await Promise.all([
@@ -673,7 +886,8 @@ async function exportAll() {
     requestToPromise(tx.objectStore('progress').getAll()),
     requestToPromise(tx.objectStore('watch_log').getAll()),
     requestToPromise(tx.objectStore('lists').getAll()),
-    requestToPromise(tx.objectStore('list_items').getAll())
+    requestToPromise(tx.objectStore('list_items').getAll()),
+    requestToPromise(tx.objectStore('viewings').getAll())
   ]);
 
   var log = parts[2];
@@ -703,7 +917,8 @@ async function exportAll() {
     progress: parts[1],
     watchLog: watchLog,
     lists: parts[3],
-    listItems: listItems
+    listItems: listItems,
+    viewings: parts[5].sort(viewingsLib().compareViewingsNewestFirst)
   };
 }
 
@@ -810,12 +1025,20 @@ function cleanImportedListItem(raw, index) {
   return { listId: raw.listId, titleKey: raw.titleKey, position: position };
 }
 
+// A viewing that fails the checks is skipped, not fatal: the rest of the file
+// still imports. Returns the clean record or null.
+function cleanImportedViewing(raw, now) {
+  var out = viewingsLib().cleanViewing(raw, viewingContext(now));
+  return out.error ? null : out.value;
+}
+
 // Checks the whole file and returns cleaned copies. Throws INVALID on the first
-// problem, before anything is written.
+// problem, before anything is written. clean.badViewings counts viewings that
+// were left out because they were invalid.
 function cleanBackup(input) {
   var data = parseBackup(input);
   var now = nowIso();
-  var clean = { titles: [], progress: [], watchLog: [], lists: [], listItems: [] };
+  var clean = { titles: [], progress: [], watchLog: [], lists: [], listItems: [], viewings: [], badViewings: 0 };
   var titles = readBackupArray(data, 'titles');
   for (var a = 0; a < titles.length; a++) clean.titles.push(cleanImportedTitle(titles[a], a, now));
   var progress = readBackupArray(data, 'progress');
@@ -826,6 +1049,12 @@ function cleanBackup(input) {
   for (var d = 0; d < lists.length; d++) clean.lists.push(cleanImportedList(lists[d], d, now));
   var items = readBackupArray(data, 'listItems');
   for (var e = 0; e < items.length; e++) clean.listItems.push(cleanImportedListItem(items[e], e));
+  var viewings = readBackupArray(data, 'viewings');
+  for (var f = 0; f < viewings.length; f++) {
+    var viewing = cleanImportedViewing(viewings[f], now);
+    if (viewing) clean.viewings.push(viewing);
+    else clean.badViewings++;
+  }
   return clean;
 }
 
@@ -884,6 +1113,8 @@ function emptyImportSummary() {
     logAdded: 0,
     listsAdded: 0,
     listItemsAdded: 0,
+    viewingsAdded: 0,
+    viewingsCreated: 0,
     skipped: 0
   };
 }
@@ -1011,6 +1242,31 @@ async function mergeImportedLists(tx, lists, listItems, known, summary) {
   }
 }
 
+// Adds the file's viewings whose id is new. Then re-works the rating of every
+// film that gained one, so the film shows its latest rated viewing.
+async function mergeImportedViewings(tx, incoming, known, summary) {
+  var store = tx.objectStore('viewings');
+  var heldIds = await requestToPromise(store.getAllKeys());
+  var seen = Object.create(null);
+  for (var i = 0; i < heldIds.length; i++) seen[heldIds[i]] = true;
+  var touched = Object.create(null);
+  var now = nowIso();
+  for (var j = 0; j < incoming.length; j++) {
+    var viewing = incoming[j];
+    if (!known[viewing.titleKey]) {
+      summary.skipped++;
+      continue;
+    }
+    if (seen[viewing.id]) continue;
+    seen[viewing.id] = true;
+    await requestToPromise(store.add(viewing));
+    touched[viewing.titleKey] = true;
+    summary.viewingsAdded++;
+  }
+  var keys = Object.keys(touched);
+  for (var k = 0; k < keys.length; k++) await syncFilmRating(tx, keys[k], now);
+}
+
 function abortQuietly(tx) {
   try {
     tx.abort();
@@ -1032,14 +1288,17 @@ async function settleQuietly(promise) {
 async function importAll(input) {
   var clean = cleanBackup(input);
   var db = await openDb();
-  var tx = db.transaction(['titles', 'progress', 'watch_log', 'lists', 'list_items'], 'readwrite');
+  var tx = db.transaction(['titles', 'progress', 'watch_log', 'lists', 'list_items', 'viewings'], 'readwrite');
   var done = txDone(tx);
   var summary = emptyImportSummary();
+  summary.skipped += clean.badViewings;
   try {
     var known = await mergeImportedTitles(tx, clean.titles, summary);
     await mergeImportedProgress(tx, clean.progress, known, summary);
     await mergeImportedLog(tx, clean.watchLog, known, summary);
     await mergeImportedLists(tx, clean.lists, clean.listItems, known, summary);
+    await mergeImportedViewings(tx, clean.viewings, known, summary);
+    summary.viewingsCreated = await addMissingBareViewings(tx);
   } catch (err) {
     abortQuietly(tx);
     await settleQuietly(done);
@@ -1072,6 +1331,11 @@ if (typeof module !== 'undefined' && module.exports) {
     undoEpisode: undoEpisode,
     markWatched: markWatched,
     getWatchLog: getWatchLog,
+    addViewing: addViewing,
+    updateViewing: updateViewing,
+    deleteViewing: deleteViewing,
+    getViewings: getViewings,
+    getAllViewings: getAllViewings,
     createList: createList,
     getLists: getLists,
     renameList: renameList,

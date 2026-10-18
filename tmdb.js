@@ -237,6 +237,20 @@ function directorIds(credits) {
   return ids;
 }
 
+// [{ id, name }] for each director, once each, in credit order. Stats shows the
+// names, so they are saved with the title.
+function directorList(credits) {
+  var list = [];
+  var seen = Object.create(null);
+  var crew = credits && Array.isArray(credits.crew) ? credits.crew : [];
+  for (var i = 0; i < crew.length; i++) {
+    if (crew[i].job !== 'Director' || seen[crew[i].id]) continue;
+    seen[crew[i].id] = true;
+    list.push({ id: crew[i].id, name: typeof crew[i].name === 'string' ? crew[i].name : '' });
+  }
+  return list;
+}
+
 function creatorIds(details) {
   var ids = [];
   var raw = details && Array.isArray(details.created_by) ? details.created_by : [];
@@ -264,6 +278,7 @@ function titleFromMovie(details, nowIso) {
       overview: details.overview || '',
       tagline: details.tagline || '',
       genres: genreNames(details),
+      directors: directorList(details.credits),
       status: details.status || '',
       releaseDate: details.release_date || ''
     },

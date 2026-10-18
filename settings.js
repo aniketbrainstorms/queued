@@ -6,6 +6,12 @@
 
 var KEY_STORAGE_NAME = 'queued.tmdb_key';
 
+// The symbol shown beside cinema ticket prices ($, EUR, a rupee sign...). It is
+// only a label: prices are never converted.
+var CURRENCY_STORAGE_NAME = 'queued.currency';
+var DEFAULT_CURRENCY = '$';
+var CURRENCY_MAX_LENGTH = 3;
+
 // v3 API key: 32 hex characters. v4 read access token: a long JWT (three
 // base64url parts, starts with "eyJ").
 var V3_KEY_PATTERN = /^[a-f0-9]{32}$/i;
@@ -86,6 +92,36 @@ function clearKey() {
   return true;
 }
 
+// The saved currency symbol, or the default if none is saved or it is unusable.
+function loadCurrencySymbol() {
+  var storage = getKeyStorage();
+  if (!storage) return DEFAULT_CURRENCY;
+  var raw = null;
+  try {
+    raw = storage.getItem(CURRENCY_STORAGE_NAME);
+  } catch (err) {
+    return DEFAULT_CURRENCY;
+  }
+  var symbol = typeof raw === 'string' ? raw.trim() : '';
+  if (symbol === '' || symbol.length > CURRENCY_MAX_LENGTH) return DEFAULT_CURRENCY;
+  return symbol;
+}
+
+// Returns { ok: true, symbol } or { ok: false, reason: 'empty' | 'long' | 'storage' }.
+function saveCurrencySymbol(raw) {
+  var symbol = typeof raw === 'string' ? raw.trim() : '';
+  if (symbol === '') return { ok: false, reason: 'empty' };
+  if (symbol.length > CURRENCY_MAX_LENGTH) return { ok: false, reason: 'long' };
+  var storage = getKeyStorage();
+  if (!storage) return { ok: false, reason: 'storage' };
+  try {
+    storage.setItem(CURRENCY_STORAGE_NAME, symbol);
+  } catch (err) {
+    return { ok: false, reason: 'storage' };
+  }
+  return { ok: true, symbol: symbol };
+}
+
 // For showing a saved key in Settings without exposing all of it.
 function maskKey(key) {
   if (typeof key !== 'string' || key.length <= 8) return '••••';
@@ -99,6 +135,9 @@ if (typeof module !== 'undefined' && module.exports) {
     loadStoredKey: loadStoredKey,
     saveKey: saveKey,
     clearKey: clearKey,
-    maskKey: maskKey
+    maskKey: maskKey,
+    DEFAULT_CURRENCY: DEFAULT_CURRENCY,
+    loadCurrencySymbol: loadCurrencySymbol,
+    saveCurrencySymbol: saveCurrencySymbol
   };
 }

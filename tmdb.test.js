@@ -305,3 +305,22 @@ test('collectionPartsInOrder sorts by release date with undated films last', () 
   assert.deepEqual(ordered.map((p) => p.id), [1, 2, 3, 9]);
   assert.deepEqual(tmdb.collectionPartsInOrder(null), []);
 });
+
+test('titleFromMovie saves director names, once each, in credit order', () => {
+  const rec = tmdb.titleFromMovie({
+    id: 7, title: 'Duo',
+    credits: { crew: [
+      { id: 9, name: 'Lana', job: 'Director' }, { id: 9, name: 'Lana', job: 'Director' },
+      { id: 8, name: 'Writer Person', job: 'Writer' }, { id: 7, name: 'Lilly', job: 'Director' },
+      { id: 6, job: 'Director' }
+    ] }
+  });
+  assert.deepEqual(rec.snapshot.directors, [
+    { id: 9, name: 'Lana' }, { id: 7, name: 'Lilly' }, { id: 6, name: '' }
+  ]);
+  assert.deepEqual(rec.directorIds, [9, 7, 6]);
+});
+
+test('titleFromMovie with no credits has an empty director list', () => {
+  assert.deepEqual(tmdb.titleFromMovie({ id: 5, title: 'Bare' }).snapshot.directors, []);
+});

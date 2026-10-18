@@ -12,7 +12,7 @@
 //
 // Change CACHE_VERSION when you add, remove or rename an app file.
 
-var CACHE_VERSION = 'queued-v2';
+var CACHE_VERSION = 'queued-v3';
 var APP_CACHE = CACHE_VERSION + '-app';
 var IMAGE_CACHE = 'queued-images';
 var MAX_IMAGES = 300;
@@ -23,6 +23,7 @@ var SHELL_FILES = [
   'index.html',
   'styles.css',
   'settings.js',
+  'viewings.js',
   'db.js',
   'progress.js',
   'tmdb.js',

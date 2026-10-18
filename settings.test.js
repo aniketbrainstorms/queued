@@ -117,3 +117,36 @@ test('maskKey shows only the ends of a key', () => {
   assert.equal(settings.maskKey('short'), '••••');
   assert.equal(settings.maskKey(undefined), '••••');
 });
+
+// ---------- currency symbol ----------
+
+test('the currency symbol defaults to a dollar sign', () => {
+  assert.equal(settings.loadCurrencySymbol(), '$');
+  assert.equal(settings.DEFAULT_CURRENCY, '$');
+});
+
+test('a saved currency symbol is trimmed and loaded back', () => {
+  assert.deepEqual(settings.saveCurrencySymbol('  \u20b9 '), { ok: true, symbol: '\u20b9' });
+  assert.equal(settings.loadCurrencySymbol(), '\u20b9');
+  assert.equal(settings.saveCurrencySymbol('CHF').ok, true);
+  assert.equal(settings.loadCurrencySymbol(), 'CHF');
+});
+
+test('an empty or long currency symbol is refused and nothing changes', () => {
+  settings.saveCurrencySymbol('\u20ac');
+  assert.deepEqual(settings.saveCurrencySymbol('   '), { ok: false, reason: 'empty' });
+  assert.deepEqual(settings.saveCurrencySymbol('dollars'), { ok: false, reason: 'long' });
+  assert.deepEqual(settings.saveCurrencySymbol(42), { ok: false, reason: 'empty' });
+  assert.equal(settings.loadCurrencySymbol(), '\u20ac');
+});
+
+test('a bad stored currency symbol falls back to the default', () => {
+  localStorage.setItem('queued.currency', 'way too long');
+  assert.equal(settings.loadCurrencySymbol(), '$');
+});
+
+test('currency settings cope with missing storage', () => {
+  installStorage(null);
+  assert.equal(settings.loadCurrencySymbol(), '$');
+  assert.deepEqual(settings.saveCurrencySymbol('\u20ac'), { ok: false, reason: 'storage' });
+});
