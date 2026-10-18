@@ -87,9 +87,7 @@ function closeDialog(id) {
   if (dialog.open) dialog.close();
 }
 
-var HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-function escapeChar(c) { return HTML_ESCAPES[c]; }
-function escapeHtml(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, escapeChar); }
+// escapeHtml comes from html.js.
 
 function isSafePath(path) { return typeof path === 'string' && /^\/[A-Za-z0-9._-]+$/.test(path); }
 
