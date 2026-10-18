@@ -643,6 +643,14 @@ async function getViewings(titleKey) {
   return list.sort(viewingsLib().compareViewingsNewestFirst);
 }
 
+// One viewing by id, or null.
+async function getViewing(id) {
+  var db = await openDb();
+  var tx = db.transaction('viewings', 'readonly');
+  var found = await requestToPromise(tx.objectStore('viewings').get(id));
+  return found || null;
+}
+
 // Every viewing, newest first.
 async function getAllViewings() {
   var db = await openDb();
@@ -1336,6 +1344,7 @@ if (typeof module !== 'undefined' && module.exports) {
     deleteViewing: deleteViewing,
     getViewings: getViewings,
     getAllViewings: getAllViewings,
+    getViewing: getViewing,
     createList: createList,
     getLists: getLists,
     renameList: renameList,
@@ -1352,3 +1361,11 @@ if (typeof module !== 'undefined' && module.exports) {
     importAll: importAll
   };
 }
+
+
+test('getViewing returns one viewing by id, or null', async () => {
+  await db.addTitle(movie(1, 'watchlist'));
+  const saved = await db.addViewing({ titleKey: 'movie:1', watchedOn: '2026-03-09', note: 'hi' });
+  assert.deepEqual(await db.getViewing(saved.id), saved);
+  assert.equal(await db.getViewing('v_nope_1'), null);
+});
