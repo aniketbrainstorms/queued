@@ -247,6 +247,174 @@ function logPromptHtml(title) {
     '<button type="button" class="primary-button grow" id="prompt-log">Log details</button></div>';
 }
 
+// ---------- on the page ----------
+// Everything below uses the page and the database, so Node does not test it;
+// the browser checklist in the plan covers it. It relies on globals from the
+// other scripts: byId, closeDialog, showToast, icon (app.js), getTitle,
+// getViewing, getViewings, addViewing, updateViewing, deleteViewing (db.js),
+// localDateString (viewings.js), loadCurrencySymbol (settings.js) and
+// onViewingsChanged (app.js).
+
+var sheetState = null;      // { draft, mode, title, confirmDelete } while the sheet is open
+var deleteTimer = null;
+var promptKey = null;       // the film the "Log details?" prompt is about
+
+function sheetContext() {
+  return {
+    title: sheetState.title,
+    today: localDateString(new Date()),
+    currency: loadCurrencySymbol(),
+    icon: icon,
+    confirmDelete: sheetState.confirmDelete
+  };
+}
+
+// Redraws the sheet from the draft and keeps the scroll position.
+function renderViewingSheet() {
+  var box = byId('viewing-content');
+  var top = box.scrollTop;
+  box.innerHTML = sheetHtml(sheetState.draft, sheetState.mode, sheetContext());
+  box.scrollTop = top;
+}
+
+// options: { titleKey } to log a new viewing, or { viewingId } to edit one.
+async function openViewingSheet(options) {
+  var existing = options.viewingId ? await getViewing(options.viewingId) : null;
+  if (options.viewingId && !existing) {
+    showToast('That viewing no longer exists');
+    return;
+  }
+  var titleKey = existing ? existing.titleKey : options.titleKey;
+  var title = await getTitle(titleKey);
+  if (!title) {
+    showToast('That film is no longer in your library');
+    return;
+  }
+  sheetState = {
+    draft: existing ? draftFromViewing(existing) : newDraft(titleKey, localDateString(new Date())),
+    mode: existing ? 'edit' : 'create',
+    title: title.title,
+    confirmDelete: false
+  };
+  renderViewingSheet();
+  var dialog = byId('viewing-dialog');
+  if (!dialog.open) dialog.showModal();
+}
+
+function onSheetInput(event) {
+  var field = event.target.closest('[data-field]');
+  if (!field || !sheetState) return;
+  var key = field.getAttribute('data-field');
+  sheetState.draft = setField(sheetState.draft, key, field.value);
+  if (key === 'note') byId('vw-count').textContent = field.value.length + '/' + SHEET_NOTE_MAX;
+}
+
+function rateFrom(button) {
+  return toggleRating(sheetState.draft.rating, Number(button.getAttribute('data-rate')));
+}
+
+function onSheetClick(event) {
+  if (!sheetState) return;
+  var target = event.target;
+  var whereButton = target.closest('[data-where]');
+  var choice = target.closest('[data-choice]');
+  var rate = target.closest('[data-rate]');
+  if (whereButton) {
+    sheetState.draft = setWhere(sheetState.draft, whereButton.getAttribute('data-where'));
+    renderViewingSheet();
+  } else if (choice) {
+    sheetState.draft = toggleChoice(sheetState.draft, choice.getAttribute('data-choice'), choice.getAttribute('data-value'));
+    renderViewingSheet();
+  } else if (rate) {
+    sheetState.draft = Object.assign({}, sheetState.draft, { rating: rateFrom(rate) });
+    renderViewingSheet();
+  } else if (target.closest('#vw-save')) {
+    saveViewingSheet();
+  } else if (target.closest('#vw-delete')) {
+    deleteViewingFromSheet();
+  }
+}
+
+async function saveViewingSheet() {
+  var draft = sheetState.draft;
+  var out = inputFromDraft(draft, localDateString(new Date()));
+  if (out.error) {
+    showToast(out.error);
+    return;
+  }
+  try {
+    if (sheetState.mode === 'edit') await updateViewing(draft.id, out.input);
+    else await addViewing(out.input);
+  } catch (err) {
+    showToast(err.message || 'Could not save the viewing');
+    return;
+  }
+  closeDialog('viewing-dialog');
+  showToast('Viewing saved');
+  onViewingsChanged(draft.titleKey);
+}
+
+function resetDeleteConfirm() {
+  if (!sheetState || !sheetState.confirmDelete) return;
+  sheetState.confirmDelete = false;
+  renderViewingSheet();
+}
+
+// The first tap asks again; the second tap deletes. The question lapses after 4 seconds.
+async function deleteViewingFromSheet() {
+  if (!sheetState.confirmDelete) {
+    sheetState.confirmDelete = true;
+    renderViewingSheet();
+    clearTimeout(deleteTimer);
+    deleteTimer = setTimeout(resetDeleteConfirm, 4000);
+    return;
+  }
+  clearTimeout(deleteTimer);
+  var draft = sheetState.draft;
+  try {
+    await deleteViewing(draft.id);
+  } catch (err) {
+    showToast(err.message || 'Could not delete the viewing');
+    return;
+  }
+  closeDialog('viewing-dialog');
+  showToast('Viewing deleted');
+  onViewingsChanged(draft.titleKey);
+}
+
+function onViewingDialogClose() {
+  clearTimeout(deleteTimer);
+  sheetState = null;
+}
+
+// ---------- the "Log details?" prompt ----------
+
+async function showLogPrompt(titleKey) {
+  var title = await getTitle(titleKey);
+  if (!title) return;
+  promptKey = titleKey;
+  byId('log-prompt-content').innerHTML = logPromptHtml(title.title);
+  byId('log-prompt-dialog').showModal();
+}
+
+// "Log details" edits the bare viewing the status change just made (the newest one).
+async function onPromptClick(event) {
+  if (!event.target.closest('#prompt-log')) return;
+  var key = promptKey;
+  closeDialog('log-prompt-dialog');
+  var list = await getViewings(key);
+  openViewingSheet(list.length > 0 ? { viewingId: list[0].id } : { titleKey: key });
+}
+
+function initViewingSheet() {
+  var content = byId('viewing-content');
+  content.addEventListener('click', onSheetClick);
+  content.addEventListener('input', onSheetInput);
+  content.addEventListener('change', onSheetInput);
+  byId('viewing-dialog').addEventListener('close', onViewingDialogClose);
+  byId('log-prompt-content').addEventListener('click', onPromptClick);
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     newDraft: newDraft,
