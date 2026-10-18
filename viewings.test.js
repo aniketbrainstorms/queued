@@ -153,3 +153,88 @@ test('compareViewingsNewestFirst sorts by date, then createdAt, then id', () => 
   list.sort(v.compareViewingsNewestFirst);
   assert.deepEqual(list.map((x) => x.id), ['v_d_1', 'v_c_1', 'v_b_1', 'v_a_1']);
 });
+
+
+// ---------- showing a viewing: dates, stars, price, stub fields ----------
+
+function logged(extra) {
+  return Object.assign({
+    id: 'v_abc_123', titleKey: 'movie:603', watchedOn: '2026-03-09', where: null, rating: null, note: '',
+    format: null, withWhom: null, cinemaName: null, cinemaCity: null, screen: null, seat: null,
+    price: null, source: null, service: null, device: null
+  }, extra);
+}
+
+test('dates are read from the text, never the clock', () => {
+  assert.equal(v.monthLabel('2026-03-09'), 'March 2026');
+  assert.equal(v.longDate('2026-03-09'), '9 March 2026');
+  assert.equal(v.longDate('2026-12-31'), '31 December 2026');
+  assert.deepEqual(v.stubDate('2026-03-09'), { month: 'MAR', day: '09' });
+  assert.deepEqual(v.stubDate('2026-10-17'), { month: 'OCT', day: '17' });
+});
+
+test('starsText shows whole stars and a half', () => {
+  assert.equal(v.starsText(5), '\u2605\u2605\u2605\u2605\u2605');
+  assert.equal(v.starsText(4.5), '\u2605\u2605\u2605\u2605\u00bd');
+  assert.equal(v.starsText(0.5), '\u00bd');
+  assert.equal(v.starsText(1), '\u2605');
+  assert.equal(v.starsText(null), '');
+});
+
+test('formatPrice keeps whole amounts plain and shows two decimals otherwise', () => {
+  assert.equal(v.formatPrice(14, '$'), '$14');
+  assert.equal(v.formatPrice(10.5, '$'), '$10.50');
+  assert.equal(v.formatPrice(12.345, 'CHF'), 'CHF12.35');
+  assert.equal(v.formatPrice(0, '\u20b9'), '\u20b90');
+});
+
+test('a full cinema viewing lists its fields in order', () => {
+  const list = v.stubFields(logged({
+    where: 'cinema', cinemaName: 'Starlight Cinema', cinemaCity: 'Portland', format: 'IMAX',
+    screen: '3', seat: 'F12', withWhom: 'Riya, Kabir', price: 14
+  }), '$');
+  assert.deepEqual(list, [
+    { icon: 'map-pin', text: 'Starlight Cinema, Portland' },
+    { icon: 'screen', text: 'IMAX' },
+    { icon: 'ticket', text: 'Screen 3, seat F12' },
+    { icon: 'users', text: 'Riya, Kabir' },
+    { icon: 'coin', text: '$14' }
+  ]);
+});
+
+test('screen and seat show alone when only one is filled', () => {
+  assert.deepEqual(v.stubFields(logged({ where: 'cinema', screen: '3' }), '$'), [{ icon: 'ticket', text: 'Screen 3' }]);
+  assert.deepEqual(v.stubFields(logged({ where: 'cinema', seat: 'F12' }), '$'), [{ icon: 'ticket', text: 'Seat F12' }]);
+});
+
+test('a cinema name without a city, and a city without a name', () => {
+  assert.deepEqual(v.stubFields(logged({ where: 'cinema', cinemaName: 'Odeon' }), '$'), [{ icon: 'map-pin', text: 'Odeon' }]);
+  assert.deepEqual(v.stubFields(logged({ where: 'cinema', cinemaCity: 'Leeds' }), '$'), [{ icon: 'map-pin', text: 'Leeds' }]);
+});
+
+test('blank fields never appear', () => {
+  assert.deepEqual(v.stubFields(logged({ where: 'cinema' }), '$'), []);
+  assert.deepEqual(v.stubFields(logged({ where: 'home' }), '$'), []);
+});
+
+test('a home viewing lists source, device, format and company', () => {
+  const list = v.stubFields(logged({
+    where: 'home', source: 'streaming', service: 'Max', device: 'laptop', format: '4K', withWhom: 'Mum'
+  }), '$');
+  assert.deepEqual(list, [
+    { icon: 'play', text: 'Streaming, Max' },
+    { icon: 'device', text: 'Laptop' },
+    { icon: 'screen', text: '4K' },
+    { icon: 'users', text: 'Mum' }
+  ]);
+});
+
+test('home sources without a service show just the source label', () => {
+  assert.deepEqual(v.stubFields(logged({ where: 'home', source: 'disc' }), '$'), [{ icon: 'play', text: 'Disc' }]);
+  assert.deepEqual(v.stubFields(logged({ where: 'home', source: 'pirated' }), '$'), [{ icon: 'play', text: 'Pirated' }]);
+  assert.deepEqual(v.stubFields(logged({ where: 'home', source: 'tv' }), '$'), [{ icon: 'play', text: 'TV' }]);
+});
+
+test('a bare viewing has no stub fields', () => {
+  assert.deepEqual(v.stubFields(logged({ rating: 4, note: 'hi' }), '$'), []);
+});
